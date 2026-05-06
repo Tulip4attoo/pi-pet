@@ -15,30 +15,41 @@ Multiple pi instances are stacked in one Windows overlay window. Drag any row to
 
 - Windows + WSL
 - Windows PowerShell available as `powershell.exe`
-- pi running from this repo/project directory
+- pi installed in WSL
 
 ## Files
 
 ```text
+package.json                   pi package manifest
+extensions/pet-bubble.ts       pi extension hooking session events
 pet-bubble.ps1                 Windows WPF overlay manager
 pet-bubble.sh                  WSL wrapper/command writer
-.pi/extensions/pet-bubble.ts   pi extension hooking session events
 show-overlay.ps1               standalone image overlay helper
 show-overlay.sh                WSL wrapper for image overlay
 ```
 
 ## Install/use with pi
 
-This repo contains a project-local pi extension at:
-
-```text
-.pi/extensions/pet-bubble.ts
-```
-
-So from this project directory, start pi normally:
+Install as a pi package from git:
 
 ```bash
-pi
+pi install git:github.com/<you>/pi-pet-bubble
+# or
+pi install https://github.com/<you>/pi-pet-bubble
+```
+
+For a project-local install, run from the target project:
+
+```bash
+pi install -l git:github.com/<you>/pi-pet-bubble
+```
+
+For local development from this checkout:
+
+```bash
+pi install ./
+# or temporary for one run:
+pi -e ./
 ```
 
 If pi is already open, reload extensions:
@@ -110,27 +121,16 @@ Useful options:
 -TransparentColor '#ff00ff' -ColorTolerance 80
 ```
 
-## Create a git repo
+## Packaging notes
 
-```bash
-git init
-git add .gitignore README.md pet-bubble.ps1 pet-bubble.sh show-overlay.ps1 show-overlay.sh .pi/extensions/pet-bubble.ts
-git commit -m "Initial pi Windows bubble overlay"
-```
+This repo is structured as a pi package. `package.json` declares:
 
-Optional: include sample assets only if you want them in the repo:
-
-```bash
-git add spritesheet.webp
-git commit -m "Add sample sprite asset"
-```
-
-Add remote and push:
-
-```bash
-git branch -M main
-git remote add origin git@github.com:<you>/<repo>.git
-git push -u origin main
+```json
+{
+  "pi": {
+    "extensions": ["./extensions/pet-bubble.ts"]
+  }
+}
 ```
 
 Runtime files under `tmp/` are ignored.
