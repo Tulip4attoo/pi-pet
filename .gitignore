@@ -1,0 +1,19 @@
+# Runtime state/logs
+/tmp/
+tmp/
+*.log
+
+# PowerShell/editor temp
+*.tmp
+*.bak
+*~
+
+# Node/package deps if this grows later
+node_modules/
+.pnpm-store/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
