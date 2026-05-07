@@ -8,12 +8,44 @@ param(
     [double]$DefaultX = 120,
     [double]$DefaultY = 120,
 
-    [string]$ManagerVersion = "3"
+    [string]$ManagerVersion = "6"
 )
 
 $ErrorActionPreference = "Stop"
 
 Add-Type -AssemblyName PresentationCore, PresentationFramework, WindowsBase
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class PiPetBubbleWin32 {
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    public static extern bool BringWindowToTop(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+}
+"@
 
 $createdNew = $false
 $mutex = New-Object System.Threading.Mutex($true, "Global\PiPetBubbleOverlayManager", [ref]$createdNew)
@@ -51,6 +83,166 @@ function Get-WslRootFromUnc([string]$Path) {
     return $null
 }
 
+function ConvertTo-WindowHandle([Int64]$Handle) {
+    if ($Handle -le 0) { return [IntPtr]::Zero }
+    return [IntPtr]::new($Handle)
+}
+
+function Test-WindowHandle([Int64]$Handle) {
+    if ($Handle -le 0) { return $false }
+    try { return [PiPetBubbleWin32]::IsWindow((ConvertTo-WindowHandle $Handle)) } catch { return $false }
+}
+
+function Get-WindowTitle([IntPtr]$Handle) {
+    try {
+        $builder = New-Object System.Text.StringBuilder 512
+        [void][PiPetBubbleWin32]::GetWindowText($Handle, $builder, $builder.Capacity)
+        return $builder.ToString()
+    }
+    catch {
+        return ""
+    }
+}
+
+function Get-OverlayWindowHandle {
+    if ($script:windowHandle -and $script:windowHandle -ne [IntPtr]::Zero) { return $script:windowHandle }
+    try {
+        if ($null -ne $window) {
+            $script:windowHandle = (New-Object System.Windows.Interop.WindowInteropHelper -ArgumentList $window).Handle
+        }
+    }
+    catch {}
+    return $script:windowHandle
+}
+
+function Get-CurrentForegroundTarget {
+    try {
+        $handle = [PiPetBubbleWin32]::GetForegroundWindow()
+        if ($handle -eq [IntPtr]::Zero) { return $null }
+
+        $overlayHandle = Get-OverlayWindowHandle
+        if ($overlayHandle -ne [IntPtr]::Zero -and $handle -eq $overlayHandle) { return $null }
+
+        [uint32]$windowProcessId = 0
+        [void][PiPetBubbleWin32]::GetWindowThreadProcessId($handle, [ref]$windowProcessId)
+        if ($windowProcessId -eq [uint32]$PID) { return $null }
+
+        return @{
+            Hwnd = $handle.ToInt64()
+            ProcessId = [int]$windowProcessId
+            Title = Get-WindowTitle $handle
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Set-BubbleFocusTarget($Item, $Command) {
+    if ($null -eq $Item) { return }
+
+    if ($Command -and ($Command.PSObject.Properties.Name -contains "focusHwnd")) {
+        try {
+            $explicitHandle = [Int64]$Command.focusHwnd
+            if (Test-WindowHandle $explicitHandle) {
+                $Item.FocusHwnd = $explicitHandle
+                if ($Command.PSObject.Properties.Name -contains "focusProcessId") { $Item.FocusProcessId = [int]$Command.focusProcessId }
+                if ($Command.PSObject.Properties.Name -contains "focusTitle") { $Item.FocusTitle = [string]$Command.focusTitle }
+                return
+            }
+        }
+        catch {}
+    }
+
+    if ($null -ne $Item.FocusHwnd -and (Test-WindowHandle ([Int64]$Item.FocusHwnd))) { return }
+
+    $target = Get-CurrentForegroundTarget
+    if ($null -eq $target) { return }
+
+    $Item.FocusHwnd = $target.Hwnd
+    $Item.FocusProcessId = $target.ProcessId
+    $Item.FocusTitle = $target.Title
+}
+
+function Activate-WindowHandle([Int64]$Handle) {
+    if (-not (Test-WindowHandle $Handle)) { return $false }
+
+    try {
+        $hwnd = ConvertTo-WindowHandle $Handle
+        # SW_RESTORE = 9, SW_SHOW = 5
+        if ([PiPetBubbleWin32]::IsIconic($hwnd)) {
+            [void][PiPetBubbleWin32]::ShowWindow($hwnd, 9)
+        }
+        else {
+            [void][PiPetBubbleWin32]::ShowWindow($hwnd, 5)
+        }
+        [void][PiPetBubbleWin32]::BringWindowToTop($hwnd)
+        return [PiPetBubbleWin32]::SetForegroundWindow($hwnd)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Find-TerminalWindow($Item) {
+    try {
+        $terminalProcessNames = @("WindowsTerminal", "wt", "OpenConsole", "conhost", "mintty", "wezterm-gui", "alacritty", "kitty", "Tabby", "FluentTerminal")
+        $dir = if ($Item.Command -and $Item.Command.dir) { [string]$Item.Command.dir } else { "" }
+        $leaf = if ($dir) { Split-Path -Leaf $dir } else { "" }
+        $focusTitle = if ($Item.FocusTitle) { [string]$Item.FocusTitle } else { "" }
+        $focusProcessId = if ($Item.FocusProcessId) { [int]$Item.FocusProcessId } else { 0 }
+
+        $scored = foreach ($process in (Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 -and -not [string]::IsNullOrWhiteSpace($_.MainWindowTitle) })) {
+            $name = [string]$process.ProcessName
+            $title = [string]$process.MainWindowTitle
+            $isTerminal = $terminalProcessNames -contains $name
+            $score = 0
+
+            if ($focusProcessId -gt 0 -and $process.Id -eq $focusProcessId) { $score += 1000 }
+            if ($focusTitle -and $title -eq $focusTitle) { $score += 400 }
+            elseif ($focusTitle -and $title.Contains($focusTitle)) { $score += 200 }
+            if ($dir -and $title.Contains($dir)) { $score += 120 }
+            if ($leaf -and $title.Contains($leaf)) { $score += 60 }
+
+            if ($score -gt 0 -or $isTerminal) {
+                [pscustomobject]@{
+                    Handle = $process.MainWindowHandle.ToInt64()
+                    Score = $score
+                    IsTerminal = $isTerminal
+                }
+            }
+        }
+
+        $best = $scored | Where-Object { $_.Score -gt 0 } | Sort-Object Score -Descending | Select-Object -First 1
+        if ($null -ne $best) { return [Int64]$best.Handle }
+
+        $terminalOnly = @($scored | Where-Object { $_.IsTerminal })
+        if ($terminalOnly.Count -eq 1) { return [Int64]$terminalOnly[0].Handle }
+    }
+    catch {}
+
+    return $null
+}
+
+function Activate-BubbleTarget([string]$Id) {
+    if (-not $items.ContainsKey($Id)) { return }
+
+    $item = $items[$Id]
+    if ($null -ne $item.FocusHwnd -and (Activate-WindowHandle ([Int64]$item.FocusHwnd))) { return }
+
+    $fallbackHandle = Find-TerminalWindow $item
+    if ($null -ne $fallbackHandle) { [void](Activate-WindowHandle ([Int64]$fallbackHandle)) }
+}
+
+function Get-BubbleIdFromSource($Source) {
+    $current = $Source
+    while ($null -ne $current) {
+        if ($current -is [Windows.FrameworkElement] -and $current.Tag) { return [string]$current.Tag }
+        try { $current = [Windows.Media.VisualTreeHelper]::GetParent($current) } catch { return $null }
+    }
+    return $null
+}
+
 function Test-WslPidActive($Command) {
     if ($null -eq $Command) { return $true }
     if (-not ($Command.PSObject.Properties.Name -contains "pid")) { return $true }
@@ -75,6 +267,32 @@ function Test-WslPidActive($Command) {
     }
 
     return $true
+}
+
+function Set-WindowInsideVirtualScreen {
+    try {
+        $screenLeft = [Windows.SystemParameters]::VirtualScreenLeft
+        $screenTop = [Windows.SystemParameters]::VirtualScreenTop
+        $screenRight = $screenLeft + [Windows.SystemParameters]::VirtualScreenWidth
+        $screenBottom = $screenTop + [Windows.SystemParameters]::VirtualScreenHeight
+
+        $width = if ($window.ActualWidth -gt 0) { $window.ActualWidth } elseif ($window.Width -gt 0) { $window.Width } else { 260 }
+        $height = if ($window.ActualHeight -gt 0) { $window.ActualHeight } elseif ($window.Height -gt 0) { $window.Height } else { 80 }
+
+        # Keep at least a useful part of the bubble visible if the saved position came from another monitor/resolution.
+        $visibleMargin = 80
+        $minLeft = $screenLeft
+        $minTop = $screenTop
+        $maxLeft = [Math]::Max($screenLeft, $screenRight - [Math]::Min($width, $visibleMargin))
+        $maxTop = [Math]::Max($screenTop, $screenBottom - [Math]::Min($height, $visibleMargin))
+
+        if ($window.Left -lt $minLeft) { $window.Left = $minLeft }
+        elseif ($window.Left -gt $maxLeft) { $window.Left = $maxLeft }
+
+        if ($window.Top -lt $minTop) { $window.Top = $minTop }
+        elseif ($window.Top -gt $maxTop) { $window.Top = $maxTop }
+    }
+    catch {}
 }
 
 function Save-State {
@@ -148,6 +366,22 @@ function New-BubbleItem([string]$Id) {
     $outer.Children.Add($border) | Out-Null
     $outer.Children.Add($accentBar) | Out-Null
 
+    $menu = New-Object Windows.Controls.ContextMenu
+
+    $showItem = New-Object Windows.Controls.MenuItem
+    $showItem.Header = "Show window"
+    $showItem.Tag = $Id
+    $showItem.Add_Click({ Activate-BubbleTarget ([string]$this.Tag) })
+
+    $closeItem = New-Object Windows.Controls.MenuItem
+    $closeItem.Header = "Close pet"
+    $closeItem.Tag = $Id
+    $closeItem.Add_Click({ Remove-BubbleItem ([string]$this.Tag) -RemoveDirectory })
+
+    $menu.Items.Add($showItem) | Out-Null
+    $menu.Items.Add($closeItem) | Out-Null
+    $outer.ContextMenu = $menu
+
     return @{
         Id = $Id
         Root = $outer
@@ -158,6 +392,9 @@ function New-BubbleItem([string]$Id) {
         LastSeq = $null
         LastWriteUtc = [DateTime]::MinValue
         Command = $null
+        FocusHwnd = $null
+        FocusProcessId = $null
+        FocusTitle = $null
     }
 }
 
@@ -199,9 +436,11 @@ function Apply-Command([string]$Id, $Command, [DateTime]$LastWriteUtc) {
     }
 
     $item = $items[$Id]
+    Set-BubbleFocusTarget $item $Command
     $item.LastSeq = if ($Command.seq) { [string]$Command.seq } else { $null }
     $item.LastWriteUtc = $LastWriteUtc
     Set-BubbleItem $item $Command
+    Set-WindowInsideVirtualScreen
 }
 
 function Remove-BubbleItem([string]$Id, [switch]$RemoveDirectory) {
@@ -267,6 +506,7 @@ $x = if ($state -and ($state.PSObject.Properties.Name -contains "x")) { [double]
 $y = if ($state -and ($state.PSObject.Properties.Name -contains "y")) { [double]$state.y } else { $DefaultY }
 
 $items = @{}
+$script:windowHandle = [IntPtr]::Zero
 
 $window = New-Object Windows.Window
 $window.WindowStyle = [Windows.WindowStyle]::None
@@ -287,10 +527,29 @@ $stack.Orientation = [Windows.Controls.Orientation]::Vertical
 $stack.Margin = New-Object Windows.Thickness 0
 $window.Content = $stack
 
+$window.Add_SourceInitialized({
+    try { $script:windowHandle = (New-Object System.Windows.Interop.WindowInteropHelper -ArgumentList $window).Handle } catch {}
+    Set-WindowInsideVirtualScreen
+})
+
+$window.Add_ContentRendered({
+    Set-WindowInsideVirtualScreen
+    Save-State
+})
+
 $window.Add_MouseLeftButtonDown({
     if ($_.ButtonState -eq [Windows.Input.MouseButtonState]::Pressed) {
+        $bubbleId = Get-BubbleIdFromSource $_.OriginalSource
+        $startLeft = $window.Left
+        $startTop = $window.Top
+
         try { $window.DragMove() } catch {}
         Save-State
+
+        $moved = ([Math]::Abs($window.Left - $startLeft) -gt 3 -or [Math]::Abs($window.Top - $startTop) -gt 3)
+        if ($bubbleId -and -not $moved) {
+            Activate-BubbleTarget $bubbleId
+        }
     }
 })
 

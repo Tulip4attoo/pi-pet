@@ -12,7 +12,7 @@ manager_state_file="$root_dir/manager-state.json"
 log_file="$root_dir/manager-powershell.log"
 dir_label="${PI_PET_BUBBLE_DIR:-$PWD}"
 owner_pid="${PI_PET_BUBBLE_PID:-$PPID}"
-manager_version="3"
+manager_version="6"
 
 usage() {
   cat <<'EOF'
@@ -28,7 +28,7 @@ Usage:
 Multi-instance:
   PI_PET_BUBBLE_ID controls which row is targeted.
   All rows are rendered by one Windows overlay window, stacked vertically.
-  Drag any row to move the whole stack.
+  Click a row to focus its terminal; drag any row to move the whole stack.
 EOF
 }
 
@@ -40,6 +40,7 @@ json_write() {
   local y="${5:-}"
 
   mkdir -p "$bubble_dir"
+
   ACTION="$action" STATUS="$status" TEXT="$text" X="$x" Y="$y" DIR_LABEL="$dir_label" OWNER_PID="$owner_pid" COMMAND_FILE="$command_file" python3 - <<'PY'
 import json, os, tempfile, time
 path = os.environ["COMMAND_FILE"]

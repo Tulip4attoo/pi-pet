@@ -9,7 +9,7 @@ It displays one row per pi instance:
 Thinking...
 ```
 
-Multiple pi instances are stacked in one Windows overlay window. Drag any row to move the whole stack.
+Multiple pi instances are stacked in one Windows overlay window. Click a row to bring its terminal window back to the front; right-click a row for Show window / Close pet; drag any row to move the whole stack.
 
 ## Requirements
 
@@ -94,7 +94,7 @@ Inside pi:
 
 ## Multi-instance behavior
 
-Each pi process gets a unique row based on its PID. Rows are rendered by one Windows overlay manager and stacked vertically.
+Each pi process gets a unique row based on its PID. Rows are rendered by one Windows overlay manager and stacked vertically. Clicking a row focuses the terminal window that was active when that row first wrote a bubble command.
 
 Manual test:
 
