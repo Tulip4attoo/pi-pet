@@ -12,7 +12,7 @@ manager_state_file="$root_dir/manager-state.json"
 log_file="$root_dir/manager-powershell.log"
 dir_label="${PI_PET_BUBBLE_DIR:-$PWD}"
 owner_pid="${PI_PET_BUBBLE_PID:-$PPID}"
-manager_version="0.2.10"
+manager_version="0.3.0"
 
 usage() {
   cat <<'EOF'
@@ -136,7 +136,7 @@ case "$cmd" in
     status="${1:-finished}"
     if [[ $# -gt 0 ]]; then shift; fi
     text="${*:-Ready}"
-    json_write set "$status" "$text"
+    json_write start "$status" "$text"
     ensure_started
     ;;
   thinking|answering|finished)
@@ -159,7 +159,7 @@ case "$cmd" in
   move)
     x="${1:?x required}"
     y="${2:?y required}"
-    json_write set "" "" "$x" "$y"
+    json_write move "" "" "$x" "$y"
     ensure_started
     ;;
   stop)

@@ -8,7 +8,7 @@ param(
     [double]$DefaultX = 120,
     [double]$DefaultY = 120,
 
-    [string]$ManagerVersion = "0.2.10"
+    [string]$ManagerVersion = "0.3.0"
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,8 +21,17 @@ using System.Runtime.InteropServices;
 using System.Text;
 
 public static class PiPetBubbleWin32 {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT {
+        public int X;
+        public int Y;
+    }
+
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    public static extern bool GetCursorPos(out POINT lpPoint);
 
     [DllImport("user32.dll")]
     public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
@@ -112,6 +121,17 @@ function Get-WindowTitle([IntPtr]$Handle) {
     catch {
         return ""
     }
+}
+
+function Get-CursorPosition {
+    try {
+        $point = New-Object PiPetBubbleWin32+POINT
+        if ([PiPetBubbleWin32]::GetCursorPos([ref]$point)) {
+            return New-Object Windows.Point ([double]$point.X), ([double]$point.Y)
+        }
+    }
+    catch {}
+    return $null
 }
 
 function Get-OverlayWindowHandle {
@@ -460,25 +480,166 @@ function Load-PetSpritesheet {
     }
 }
 
-function Update-PetIdleFrame([switch]$Force) {
+function Get-PetAnimationSpec([string]$State) {
+    $normalized = if ([string]::IsNullOrWhiteSpace($State)) { "idle" } else { $State.ToLowerInvariant() }
+    switch ($normalized) {
+        "running-right" { return @{ State = "running-right"; Row = 1; Frames = 8; Durations = @(90, 90, 90, 90, 90, 90, 90, 90); Loop = $true } }
+        "running-left"  { return @{ State = "running-left";  Row = 2; Frames = 8; Durations = @(90, 90, 90, 90, 90, 90, 90, 90); Loop = $true } }
+        "waving"        { return @{ State = "waving";        Row = 3; Frames = 4; Durations = @(130, 130, 160, 240); Loop = $false } }
+        "jumping"       { return @{ State = "jumping";       Row = 4; Frames = 5; Durations = @(105, 105, 125, 145, 220); Loop = $false } }
+        "failed"        { return @{ State = "failed";        Row = 5; Frames = 8; Durations = @(170, 170, 170, 170, 170, 170, 170, 220); Loop = $true } }
+        "waiting"       { return @{ State = "waiting";       Row = 6; Frames = 6; Durations = @(280, 130, 130, 180, 180, 330); Loop = $true } }
+        "running"       { return @{ State = "running";       Row = 7; Frames = 6; Durations = @(100, 100, 100, 100, 100, 115); Loop = $true } }
+        "review"        { return @{ State = "review";        Row = 8; Frames = 6; Durations = @(190, 190, 220, 220, 260, 300); Loop = $true } }
+        default          { return @{ State = "idle";          Row = 0; Frames = 6; Durations = @(280, 110, 110, 140, 140, 320); Loop = $true } }
+    }
+}
+
+function Normalize-PetState([string]$State) {
+    return (Get-PetAnimationSpec $State).State
+}
+
+function Start-PetAnimation([string]$State, [switch]$Transient, [string]$ReturnState) {
+    if ($null -eq $script:petImage -or $null -eq $script:petSpritesheet) { return }
+
+    try {
+        $spec = Get-PetAnimationSpec $State
+        $normalized = [string]$spec.State
+        $return = if ([string]::IsNullOrWhiteSpace($ReturnState)) { $script:petBaseState } else { Normalize-PetState $ReturnState }
+        if ([string]::IsNullOrWhiteSpace($return)) { $return = "idle" }
+
+        if ($script:petCurrentState -eq $normalized -and $script:petTransient -eq [bool]$Transient) { return }
+
+        $script:petCurrentState = $normalized
+        $script:petTransient = [bool]$Transient
+        $script:petReturnState = $return
+        $script:petFrameIndex = 0
+        $script:nextPetFrameUtc = [DateTime]::MinValue
+        Update-PetFrame -Force
+    }
+    catch {}
+}
+
+function Set-PetBaseState([string]$State, [switch]$Interrupt) {
+    $normalized = Normalize-PetState $State
+    if ([string]::IsNullOrWhiteSpace($normalized)) { $normalized = "idle" }
+    $script:petBaseState = $normalized
+
+    if ($Interrupt -or -not $script:petTransient) {
+        Start-PetAnimation $normalized
+    }
+}
+
+function Start-PetTransient([string]$State, [string]$ReturnState) {
+    $return = if ([string]::IsNullOrWhiteSpace($ReturnState)) { $script:petBaseState } else { $ReturnState }
+    if ([string]::IsNullOrWhiteSpace($return)) { $return = "idle" }
+    Start-PetAnimation $State -Transient -ReturnState $return
+}
+
+function Update-PetFrame([switch]$Force) {
     if ($null -eq $script:petImage -or $null -eq $script:petSpritesheet) { return }
 
     $now = [DateTime]::UtcNow
     if (-not $Force -and $now -lt $script:nextPetFrameUtc) { return }
 
     try {
-        $frameCount = $script:petIdleDurations.Count
-        $frame = $script:petFrameIndex % $frameCount
-        $rect = New-Object Windows.Int32Rect ($frame * 192), 0, 192, 208
+        $spec = Get-PetAnimationSpec $script:petCurrentState
+        $frameCount = [int]$spec.Frames
+        if ($frameCount -le 0) { return }
+
+        if ($script:petFrameIndex -ge $frameCount) {
+            if ($script:petTransient -or -not [bool]$spec.Loop) {
+                $return = if ([string]::IsNullOrWhiteSpace($script:petReturnState)) { $script:petBaseState } else { $script:petReturnState }
+                if ([string]::IsNullOrWhiteSpace($return)) { $return = "idle" }
+                Start-PetAnimation $return
+                return
+            }
+            $script:petFrameIndex = 0
+        }
+
+        $frame = [int]$script:petFrameIndex
+        $row = [int]$spec.Row
+        $rect = New-Object Windows.Int32Rect ($frame * 192), ($row * 208), 192, 208
         $crop = New-Object Windows.Media.Imaging.CroppedBitmap -ArgumentList $script:petSpritesheet, $rect
         $crop.Freeze()
         $script:petImage.Source = $crop
 
-        $delay = [int]$script:petIdleDurations[$frame]
-        $script:petFrameIndex = ($frame + 1) % $frameCount
+        $durations = @($spec.Durations)
+        $delay = if ($durations.Count -gt $frame) { [int]$durations[$frame] } else { 140 }
+        $script:petFrameIndex = $frame + 1
         $script:nextPetFrameUtc = $now.AddMilliseconds($delay)
     }
     catch {}
+}
+
+function Get-CommandPetBaseState($Command) {
+    if ($null -eq $Command) { return "idle" }
+    $status = if ($Command.status) { ([string]$Command.status).ToLowerInvariant() } else { "finished" }
+    switch ($status) {
+        "thinking"  { return "running" }
+        "answering" { return "running" }
+        "running"   { return "running" }
+        "working"   { return "running" }
+        "busy"      { return "running" }
+        "waiting"   { return "idle" }
+        "idle"      { return "idle" }
+        "ready"     { return "idle" }
+        "finished"  { return "idle" }
+        "done"      { return "idle" }
+        "review"    { return "review" }
+        "failed"    { return "failed" }
+        "error"     { return "failed" }
+        default      { return "idle" }
+    }
+}
+
+function Get-BasePetStateFromItems {
+    $latest = $null
+    foreach ($item in $items.Values) {
+        if ($null -eq $item.Command) { continue }
+        if ($null -eq $latest -or $item.LastWriteUtc -gt $latest.LastWriteUtc) { $latest = $item }
+    }
+
+    foreach ($item in $items.Values) {
+        if ((Get-CommandPetBaseState $item.Command) -eq "running") { return "running" }
+    }
+
+    if ($null -ne $latest) { return Get-CommandPetBaseState $latest.Command }
+    return "idle"
+}
+
+function Update-PetAnimationFromCommand($Command, [bool]$IsNewItem) {
+    if ($null -eq $script:petImage -or $null -eq $script:petSpritesheet) { return }
+
+    $action = if ($Command -and $Command.action) { ([string]$Command.action).ToLowerInvariant() } else { "set" }
+    $status = if ($Command -and $Command.status) { ([string]$Command.status).ToLowerInvariant() } else { "finished" }
+    $base = Get-BasePetStateFromItems
+
+    if ($base -eq "running" -or $base -eq "failed") {
+        Set-PetBaseState $base -Interrupt
+        return
+    }
+
+    Set-PetBaseState $base
+
+    if ($action -eq "start" -or $IsNewItem) {
+        Start-PetTransient "waving" $base
+        return
+    }
+
+    if ($status -eq "finished" -or $status -eq "done") {
+        Start-PetTransient "jumping" $base
+        return
+    }
+
+    if ($status -eq "waving" -or $status -eq "hello") {
+        Start-PetTransient "waving" $base
+        return
+    }
+
+    if ($status -eq "jumping") {
+        Start-PetTransient "jumping" $base
+    }
 }
 
 function Get-UsageRingColor([double]$RemainingPercent, [string]$Role) {
@@ -737,10 +898,13 @@ function New-PetView {
     $root.Children.Add($labelCanvas) | Out-Null
 
     $script:petImage = $image
-    $script:petIdleDurations = @(280, 110, 110, 140, 140, 320)
+    $script:petBaseState = "idle"
+    $script:petCurrentState = ""
+    $script:petReturnState = "idle"
+    $script:petTransient = $false
     $script:petFrameIndex = 0
     $script:nextPetFrameUtc = [DateTime]::MinValue
-    Update-PetIdleFrame -Force
+    Start-PetAnimation "idle"
     return $root
 }
 
@@ -854,12 +1018,19 @@ function Apply-Command([string]$Id, $Command, [DateTime]$LastWriteUtc) {
     if ($Command.PSObject.Properties.Name -contains "y") { $window.Top = [double]$Command.y }
 
     $action = if ($Command.action) { [string]$Command.action } else { "set" }
-    if ($action.ToLowerInvariant() -eq "stop") {
+    $normalizedAction = $action.ToLowerInvariant()
+    if ($normalizedAction -eq "stop") {
         Remove-BubbleItem $Id -RemoveDirectory
         return
     }
+    if ($normalizedAction -eq "move") {
+        if ($items.ContainsKey($Id)) { $items[$Id].LastWriteUtc = $LastWriteUtc }
+        Set-WindowInsideVirtualScreen
+        return
+    }
 
-    if (-not $items.ContainsKey($Id)) {
+    $isNewItem = -not $items.ContainsKey($Id)
+    if ($isNewItem) {
         $items[$Id] = New-BubbleItem $Id
         Sort-BubbleItems
     }
@@ -869,6 +1040,7 @@ function Apply-Command([string]$Id, $Command, [DateTime]$LastWriteUtc) {
     $item.LastSeq = if ($Command.seq) { [string]$Command.seq } else { $null }
     $item.LastWriteUtc = $LastWriteUtc
     Set-BubbleItem $item $Command
+    Update-PetAnimationFromCommand $Command $isNewItem
     Set-WindowInsideVirtualScreen
 }
 
@@ -887,6 +1059,9 @@ function Remove-BubbleItem([string]$Id, [switch]$RemoveDirectory) {
 
     if ($hadItem -and $items.Count -eq 0) {
         $window.Close()
+    }
+    elseif ($hadItem) {
+        Set-PetBaseState (Get-BasePetStateFromItems) -Interrupt
     }
 }
 
@@ -981,6 +1156,14 @@ $items = @{}
 $script:windowHandle = [IntPtr]::Zero
 $script:petViewRoot = $null
 $script:usingDefaultPosition = -not $hasSavedPosition
+$script:isDragging = $false
+$script:dragMoved = $false
+$script:dragBubbleId = $null
+$script:dragPetClick = $false
+$script:dragStartCursor = $null
+$script:dragStartLeft = 0.0
+$script:dragStartTop = 0.0
+$script:dragLastDirection = ""
 
 $window = New-Object Windows.Window
 $window.WindowStyle = [Windows.WindowStyle]::None
@@ -1041,23 +1224,72 @@ $window.Add_ContentRendered({
 
 $window.Add_MouseLeftButtonDown({
     if ($_.ButtonState -eq [Windows.Input.MouseButtonState]::Pressed) {
-        $bubbleId = Get-BubbleIdFromSource $_.OriginalSource
-        $isPetClick = Test-SourceWithinPetView $_.OriginalSource
-        $startLeft = $window.Left
-        $startTop = $window.Top
+        $cursor = Get-CursorPosition
+        if ($null -eq $cursor) { return }
 
-        try { $window.DragMove() } catch {}
-        Save-State
+        $script:isDragging = $true
+        $script:dragMoved = $false
+        $script:dragBubbleId = Get-BubbleIdFromSource $_.OriginalSource
+        $script:dragPetClick = Test-SourceWithinPetView $_.OriginalSource
+        $script:dragStartCursor = $cursor
+        $script:dragStartLeft = [double]$window.Left
+        $script:dragStartTop = [double]$window.Top
+        $script:dragLastDirection = ""
+        try { [void]$window.CaptureMouse() } catch {}
+    }
+})
 
-        $moved = ([Math]::Abs($window.Left - $startLeft) -gt 3 -or [Math]::Abs($window.Top - $startTop) -gt 3)
-        if (-not $moved) {
-            if ($bubbleId) {
-                Activate-BubbleTarget $bubbleId
-            }
-            elseif ($isPetClick) {
-                Activate-DefaultBubbleTarget
-            }
+$window.Add_MouseMove({
+    if (-not $script:isDragging) { return }
+    if ($_.LeftButton -ne [Windows.Input.MouseButtonState]::Pressed) { return }
+
+    $cursor = Get-CursorPosition
+    if ($null -eq $cursor -or $null -eq $script:dragStartCursor) { return }
+
+    $dx = [double]$cursor.X - [double]$script:dragStartCursor.X
+    $dy = [double]$cursor.Y - [double]$script:dragStartCursor.Y
+    if ([Math]::Abs($dx) -le 3 -and [Math]::Abs($dy) -le 3) { return }
+
+    $script:dragMoved = $true
+    $window.Left = [double]$script:dragStartLeft + $dx
+    $window.Top = [double]$script:dragStartTop + $dy
+
+    if ([Math]::Abs($dx) -gt 3) {
+        $direction = if ($dx -gt 0) { "running-right" } else { "running-left" }
+        if ($script:dragLastDirection -ne $direction) {
+            $script:dragLastDirection = $direction
+            Start-PetAnimation $direction
         }
+    }
+})
+
+$window.Add_MouseLeftButtonUp({
+    if (-not $script:isDragging) { return }
+
+    $moved = [bool]$script:dragMoved
+    $bubbleId = $script:dragBubbleId
+    $isPetClick = [bool]$script:dragPetClick
+
+    $script:isDragging = $false
+    $script:dragMoved = $false
+    $script:dragBubbleId = $null
+    $script:dragPetClick = $false
+    $script:dragStartCursor = $null
+    $script:dragLastDirection = ""
+    try { $window.ReleaseMouseCapture() } catch {}
+
+    if ($moved) {
+        Save-State
+        Set-PetBaseState (Get-BasePetStateFromItems) -Interrupt
+        return
+    }
+
+    if ($bubbleId) {
+        Activate-BubbleTarget ([string]$bubbleId)
+    }
+    elseif ($isPetClick) {
+        Start-PetTransient "waving" $script:petBaseState
+        Activate-DefaultBubbleTarget
     }
 })
 
@@ -1090,7 +1322,7 @@ $timer.Start()
 
 $petTimer = New-Object Windows.Threading.DispatcherTimer
 $petTimer.Interval = [TimeSpan]::FromMilliseconds(60)
-$petTimer.Add_Tick({ try { Update-PetIdleFrame } catch {} })
+$petTimer.Add_Tick({ try { Update-PetFrame } catch {} })
 $petTimer.Start()
 
 $window.Add_Closed({

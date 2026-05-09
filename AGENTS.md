@@ -38,12 +38,27 @@ Rows have fixed meanings and should stay stable unless the project intentionally
 Initial pi status mapping should prefer:
 
 ```text
-Ready/Finished -> idle or waiting
-Thinking       -> review
+Ready/Finished -> idle
+Thinking       -> running
 Answering      -> running
 Error          -> failed
 Manual hello   -> waving
 ```
+
+Current product direction: keep runtime pet state simple and playful rather than mirroring every agent/internal state. Use this minimal behavior mapping unless intentionally changing the UX:
+
+```text
+Pet/bubble first appears -> waving for one loop, then idle
+Active work starts       -> running
+Task finishes            -> jumping for one loop, then idle
+Idle/ready/background    -> idle
+Pet click                -> waving for one loop, then previous/base state
+Drag right               -> running-right while dragging/moving right
+Drag left                -> running-left while dragging/moving left
+Error/failure            -> failed when there is a clear error signal
+```
+
+`review` can remain supported by the sprite contract/manual statuses, but it is not a primary UX state for now. `running-left`/`running-right` are locomotion animations for dragging, not agent-work states.
 
 ## Important regression note
 
