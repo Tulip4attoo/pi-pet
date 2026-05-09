@@ -64,8 +64,7 @@ After that, the bubble updates automatically:
 
 ```text
 session_start  -> Ready
-agent_start    -> Thinking...
-message_update -> Answering...
+agent_start    -> Working...
 agent_end      -> Finished
 quit/exit      -> remove this row
 ```
@@ -78,8 +77,7 @@ From WSL:
 
 ```bash
 ./pet-bubble.sh start
-./pet-bubble.sh thinking "Thinking..."
-./pet-bubble.sh answering "Answering..."
+./pet-bubble.sh thinking "Working..."
 ./pet-bubble.sh finished "Done"
 ./pet-bubble.sh stop
 ```
@@ -88,8 +86,7 @@ Inside pi:
 
 ```text
 /bubble start
-/bubble thinking đang nghĩ...
-/bubble answering đang trả lời...
+/bubble thinking đang làm...
 /bubble finished xong rồi
 /bubble stop
 ```
@@ -102,9 +99,10 @@ Manage pets from inside pi:
 /pet use einstein
 /pet list
 /pet current
+/pet agent guide
 ```
 
-Bare `/pet install <name>` uses Petdex by default. A `codex-pets.net` URL installs from Codex Pets.
+Bare `/pet install <name>` uses Petdex by default. A `codex-pets.net` URL installs from Codex Pets. `/pet agent guide` adds short guidance for agent-driven pet changes using the `pi_pet` tool.
 
 ## Multi-instance behavior
 

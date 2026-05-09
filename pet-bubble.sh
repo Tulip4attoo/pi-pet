@@ -142,8 +142,8 @@ case "$cmd" in
   thinking|answering|finished)
     text="$*"
     case "$cmd" in
-      thinking)  [[ -n "$text" ]] || text="Thinking..." ;;
-      answering) [[ -n "$text" ]] || text="Answering..." ;;
+      thinking)  [[ -n "$text" ]] || text="Working..." ;;
+      answering) [[ -n "$text" ]] || text="Working..." ;;
       finished)  [[ -n "$text" ]] || text="Finished" ;;
     esac
     json_write set "$cmd" "$text"

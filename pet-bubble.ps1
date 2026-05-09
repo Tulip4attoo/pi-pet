@@ -423,8 +423,8 @@ function Save-State {
 
 function Get-StatusStyle([string]$Status) {
     switch ($Status.ToLowerInvariant()) {
-        "thinking"  { return @{ Text = "Thinking...";  Border = "#99FBBF24"; Accent = "#FFFBBF24" } }
-        "answering" { return @{ Text = "Answering..."; Border = "#9934D399"; Accent = "#FF34D399" } }
+        "thinking"  { return @{ Text = "Working...";  Border = "#99FBBF24"; Accent = "#FFFBBF24" } }
+        "answering" { return @{ Text = "Working...";  Border = "#9934D399"; Accent = "#FF34D399" } }
         "finished"  { return @{ Text = "Finished";   Border = "#9960A5FA"; Accent = "#FF60A5FA" } }
         default     { return @{ Text = $Status;       Border = "#99A78BFA"; Accent = "#FFA78BFA" } }
     }

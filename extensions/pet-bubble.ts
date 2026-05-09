@@ -389,6 +389,49 @@ type CompletionItem = {
 
 const PET_SLUG_RE = /^[A-Za-z0-9._-]+$/;
 
+const PET_GUIDE = [
+  "Pi-pet agent guide: install and switch desktop pets",
+  "",
+  "For agent-driven pet changes, use the pi_pet tool. Do not write /pet commands in bash or in assistant text expecting them to auto-run.",
+  "The /pet slash command namespace is for the user/editor; the pi_pet tool is for the model. Pet sources are Petdex and Codex Pets.",
+  "",
+  "pi_pet tool actions:",
+  "- action: list",
+  "  Lists installed pets first. If the requested pet is already installed, prefer action: use.",
+  "- action: use, target: <installed-slug>",
+  "  Switches to an already installed pet.",
+  "- action: install, target: <petdex-slug-or-url>",
+  "  Installs a pet and makes it active. Bare names/slugs use Petdex by default, e.g. luffy.",
+  "  Use a codex-pets.net URL for Codex Pets, e.g. https://codex-pets.net/#/pets/dario.",
+  "- action: current",
+  "  Shows the active pet.",
+  "",
+  "Natural-language workflow:",
+  "1. When the user asks to change pets, check the installed pet list first if it is not already available in the current conversation. Do not call list repeatedly when a fresh list is already present.",
+  "2. If an installed slug matches the request, call pi_pet with action: use and that slug; do not reinstall it.",
+  "3. If it is not installed, find or infer a valid Petdex slug or Codex Pets URL. Install only when reasonably confident.",
+  "4. If multiple plausible candidates exist, ask the user to choose before installing.",
+  "5. If install fails with not found/404, do not keep retrying the same slug. Search Petdex and Codex Pets for close names/aliases, try a better candidate if confident, otherwise explain the miss and ask the user for a slug or URL.",
+  "6. If web/search is unavailable, avoid guessing obscure names; ask the user for the exact Petdex slug or Codex Pets URL.",
+].join("\n");
+
+const PetToolParams = {
+  type: "object",
+  properties: {
+    action: {
+      type: "string",
+      enum: ["list", "current", "use", "install"],
+      description: "Pet action to perform. Use list before deciding whether to use or install.",
+    },
+    target: {
+      type: "string",
+      description: "Installed slug for use, or Petdex slug/Codex Pets URL for install.",
+    },
+  },
+  required: ["action"],
+  additionalProperties: false,
+} as const;
+
 function petCommandUsage(): string {
   return [
     "Usage:",
@@ -396,6 +439,7 @@ function petCommandUsage(): string {
     "  /pet use <installed-slug>",
     "  /pet list",
     "  /pet current",
+    "  /pet agent guide",
     "",
     "Bare install names use Petdex. Use a codex-pets.net URL for Codex Pets.",
   ].join("\n");
@@ -532,6 +576,9 @@ async function getPetCompletions(prefix: string): Promise<CompletionItem[] | nul
       { value: "ls", label: "ls", description: "Alias for list" },
       { value: "current", label: "current", description: "Show the active pet" },
       { value: "active", label: "active", description: "Alias for current" },
+      { value: "agent guide", label: "agent guide", description: "Add pi-pet tool guidance to this conversation" },
+      { value: "load guide", label: "load guide", description: "Alias for agent guide" },
+      { value: "guide", label: "guide", description: "Alias for agent guide" },
       { value: "help", label: "help", description: "Show /pet usage" },
       ...installedPetCompletions,
     ],
@@ -563,6 +610,66 @@ async function installPet(target: string): Promise<string> {
   if (result.code !== 0) throw new Error(`Pet install failed.\n${lastOutput(result)}`.trim());
 
   return (await readActivePet()) ?? target.trim();
+}
+
+function requirePetTarget(target: string | undefined, action: string): string {
+  const trimmed = target?.trim() ?? "";
+  if (!trimmed) throw new Error(`target is required for pi_pet action: ${action}`);
+  return trimmed;
+}
+
+async function runPetToolAction(action: "list" | "current" | "use" | "install", target: string | undefined, ctx: ExtensionContext) {
+  switch (action) {
+    case "list": {
+      const pets = await listInstalledPets();
+      return {
+        content: [{ type: "text" as const, text: formatPetList(pets) }],
+        details: { action, pets },
+      };
+    }
+
+    case "current": {
+      const activePet = (await readActivePet()) ?? "none";
+      return {
+        content: [{ type: "text" as const, text: `Active pet: ${activePet}` }],
+        details: { action, activePet },
+      };
+    }
+
+    case "use": {
+      const slug = requirePetTarget(target, action);
+      const activePet = await activatePet(slug);
+      restartPetOverlay(ctx.cwd, activePet);
+      return {
+        content: [{ type: "text" as const, text: `Active pet: ${activePet}` }],
+        details: { action, activePet },
+      };
+    }
+
+    case "install": {
+      const installTarget = requirePetTarget(target, action);
+      runBubble(ctx.cwd, ["thinking", `Installing pet ${installTarget}...`]);
+      const activePet = await installPet(installTarget);
+      restartPetOverlay(ctx.cwd, activePet);
+      return {
+        content: [{ type: "text" as const, text: `Installed and activated pet: ${activePet}` }],
+        details: { action, target: installTarget, activePet },
+      };
+    }
+  }
+}
+
+function loadPetGuide(pi: ExtensionAPI, ctx: ExtensionContext): void {
+  pi.sendMessage(
+    {
+      customType: "pi-pet-guide",
+      content: PET_GUIDE,
+      display: true,
+      details: { kind: "pet-management-guide" },
+    },
+    { triggerTurn: false },
+  );
+  ctx.ui.notify("pi-pet guide added to this conversation", "info");
 }
 
 function restartPetOverlay(projectCwd: string, activePet: string): void {
@@ -600,28 +707,16 @@ async function chooseInstalledPet(ctx: ExtensionContext): Promise<string | undef
 }
 
 export default function (pi: ExtensionAPI) {
-  let markedAnswering = false;
-
   pi.on("session_start", async (_event, ctx) => {
     runBubble(ctx.cwd, ["start", "finished", "Ready"]);
     void refreshUsage(ctx, { refresh: true });
   });
 
   pi.on("agent_start", async (_event, ctx) => {
-    markedAnswering = false;
-    runBubble(ctx.cwd, ["thinking", "Thinking..."]);
-  });
-
-  pi.on("message_update", async (event, ctx) => {
-    if (markedAnswering) return;
-    if (event.message.role !== "assistant") return;
-
-    markedAnswering = true;
-    runBubble(ctx.cwd, ["answering", "Answering..."]);
+    runBubble(ctx.cwd, ["thinking", "Working..."]);
   });
 
   pi.on("agent_end", async (_event, ctx) => {
-    markedAnswering = false;
     runBubble(ctx.cwd, ["finished", "Finished"]);
     void refreshUsage(ctx, { refresh: true });
   });
@@ -643,8 +738,23 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerTool({
+    name: "pi_pet",
+    label: "Pi Pet",
+    description: "Manage the desktop pet: list installed pets, show current pet, switch to an installed pet, or install a Petdex/Codex Pets pet.",
+    promptSnippet: "Manage the desktop pet with list/current/use/install actions.",
+    promptGuidelines: [
+      "Use pi_pet for agent-driven desktop pet changes instead of writing /pet slash commands or running /pet in bash.",
+      "Use pi_pet with action list before installing; if the requested pet is already installed, use action use instead of reinstalling.",
+    ],
+    parameters: PetToolParams,
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      return runPetToolAction(params.action, params.target, ctx);
+    },
+  });
+
   pi.registerCommand("pet", {
-    description: "Install or switch the desktop pet: install <slug-or-url>, use <slug>, list, current",
+    description: "Install or switch the desktop pet: install <slug-or-url>, use <slug>, list, current, agent guide",
     getArgumentCompletions: getPetCompletions,
     handler: async (args, ctx) => {
       const trimmed = args.trim();
@@ -704,6 +814,26 @@ export default function (pi: ExtensionAPI) {
           case "current":
           case "active":
             ctx.ui.notify(`Active pet: ${(await readActivePet()) ?? "none"}`, "info");
+            return;
+
+          case "guide":
+            loadPetGuide(pi, ctx);
+            return;
+
+          case "agent":
+            if ((rest[0] ?? "").toLowerCase() === "guide") {
+              loadPetGuide(pi, ctx);
+              return;
+            }
+            ctx.ui.notify("Usage: /pet agent guide", "error");
+            return;
+
+          case "load":
+            if ((rest[0] ?? "").toLowerCase() === "guide") {
+              loadPetGuide(pi, ctx);
+              return;
+            }
+            ctx.ui.notify("Usage: /pet agent guide", "error");
             return;
 
           case "use":
