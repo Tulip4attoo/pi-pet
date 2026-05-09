@@ -381,6 +381,12 @@ type InstalledPet = {
   active: boolean;
 };
 
+type CompletionItem = {
+  value: string;
+  label: string;
+  description?: string;
+};
+
 const PET_SLUG_RE = /^[A-Za-z0-9._-]+$/;
 
 function petCommandUsage(): string {
@@ -393,6 +399,19 @@ function petCommandUsage(): string {
     "",
     "Bare install names use Petdex. Use a codex-pets.net URL for Codex Pets.",
   ].join("\n");
+}
+
+function completionItems(candidates: CompletionItem[], prefix: string): CompletionItem[] | null {
+  const normalizedPrefix = prefix.trimStart().toLowerCase();
+  const seen = new Set<string>();
+  const items = candidates.filter((candidate) => {
+    const key = candidate.value.toLowerCase();
+    if (seen.has(key)) return false;
+    if (!key.startsWith(normalizedPrefix)) return false;
+    seen.add(key);
+    return true;
+  });
+  return items.length > 0 ? items : null;
 }
 
 function assertPetSlug(slug: string): void {
@@ -486,6 +505,38 @@ async function listInstalledPets(): Promise<InstalledPet[]> {
 function formatPetList(pets: InstalledPet[]): string {
   if (pets.length === 0) return "No pets installed.";
   return pets.map((pet) => `${pet.active ? "*" : " "} ${pet.slug} — ${pet.displayName}`).join("\n");
+}
+
+async function getPetCompletions(prefix: string): Promise<CompletionItem[] | null> {
+  const installedPets = await listInstalledPets();
+  const installedPetCompletions = installedPets.flatMap((pet): CompletionItem[] => {
+    const description = `${pet.active ? "Active" : "Installed"}: ${pet.displayName}`;
+    return [
+      { value: `use ${pet.slug}`, label: `use ${pet.slug}`, description },
+      { value: `set ${pet.slug}`, label: `set ${pet.slug}`, description: `Alias for use. ${description}` },
+      { value: `activate ${pet.slug}`, label: `activate ${pet.slug}`, description: `Alias for use. ${description}` },
+      { value: pet.slug, label: pet.slug, description: `Shortcut: activate installed pet. ${description}` },
+    ];
+  });
+
+  return completionItems(
+    [
+      { value: "install ", label: "install", description: "Install a Petdex slug or Petdex/Codex Pets URL" },
+      { value: "install luffy", label: "install luffy", description: "Example Petdex install" },
+      { value: "install https://codex-pets.net/#/pets/dario", label: "install Codex Pets URL", description: "Example Codex Pets install" },
+      { value: "add ", label: "add", description: "Alias for install" },
+      { value: "use ", label: "use", description: "Activate an installed pet" },
+      { value: "set ", label: "set", description: "Alias for use" },
+      { value: "activate ", label: "activate", description: "Alias for use" },
+      { value: "list", label: "list", description: "List installed pets" },
+      { value: "ls", label: "ls", description: "Alias for list" },
+      { value: "current", label: "current", description: "Show the active pet" },
+      { value: "active", label: "active", description: "Alias for current" },
+      { value: "help", label: "help", description: "Show /pet usage" },
+      ...installedPetCompletions,
+    ],
+    prefix,
+  );
 }
 
 async function activatePet(slug: string): Promise<string> {
@@ -594,6 +645,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("pet", {
     description: "Install or switch the desktop pet: install <slug-or-url>, use <slug>, list, current",
+    getArgumentCompletions: getPetCompletions,
     handler: async (args, ctx) => {
       const trimmed = args.trim();
       const [command = "", ...rest] = trimmed.split(/\s+/);
