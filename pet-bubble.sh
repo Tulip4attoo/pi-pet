@@ -12,7 +12,7 @@ manager_state_file="$root_dir/manager-state.json"
 log_file="$root_dir/manager-powershell.log"
 dir_label="${PI_PET_BUBBLE_DIR:-$PWD}"
 owner_pid="${PI_PET_BUBBLE_PID:-$PPID}"
-manager_version="7"
+manager_version="9"
 
 usage() {
   cat <<'EOF'

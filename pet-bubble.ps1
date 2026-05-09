@@ -8,7 +8,7 @@ param(
     [double]$DefaultX = 120,
     [double]$DefaultY = 120,
 
-    [string]$ManagerVersion = "7"
+    [string]$ManagerVersion = "9"
 )
 
 $ErrorActionPreference = "Stop"
@@ -337,6 +337,113 @@ function Get-StatusStyle([string]$Status) {
     }
 }
 
+function Get-DefaultPetDirectory {
+    try {
+        $petsRoot = Join-Path $PSScriptRoot "pets"
+        if (-not (Test-Path -LiteralPath $petsRoot)) { return $null }
+
+        $envPet = [string]$env:PI_PET_ACTIVE_PET
+        if (-not [string]::IsNullOrWhiteSpace($envPet) -and $envPet -match '^[A-Za-z0-9._-]+$') {
+            $candidate = Join-Path $petsRoot $envPet
+            if (Test-Path -LiteralPath (Join-Path $candidate "pet.json")) { return $candidate }
+        }
+
+        $activePath = Join-Path $petsRoot "active"
+        if (Test-Path -LiteralPath $activePath) {
+            $active = (Get-Content -LiteralPath $activePath -Raw -ErrorAction SilentlyContinue).Trim()
+            if ($active -match '^[A-Za-z0-9._-]+$') {
+                $candidate = Join-Path $petsRoot $active
+                if (Test-Path -LiteralPath (Join-Path $candidate "pet.json")) { return $candidate }
+            }
+        }
+
+        foreach ($fallback in @("default", "einstein", "luffy")) {
+            $candidate = Join-Path $petsRoot $fallback
+            if (Test-Path -LiteralPath (Join-Path $candidate "pet.json")) { return $candidate }
+        }
+
+        $first = Get-ChildItem -LiteralPath $petsRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "pet.json") } |
+            Sort-Object Name |
+            Select-Object -First 1
+        if ($null -ne $first) { return $first.FullName }
+    }
+    catch {}
+    return $null
+}
+
+function Load-PetSpritesheet {
+    $petDir = Get-DefaultPetDirectory
+    if (-not $petDir) { return $null }
+
+    try {
+        $manifestPath = Join-Path $petDir "pet.json"
+        $manifest = Read-JsonFile $manifestPath
+        $spriteName = if ($manifest -and $manifest.spritesheetPath) { [string]$manifest.spritesheetPath } else { "spritesheet.webp" }
+        $spritePath = Join-Path $petDir $spriteName
+        if (-not (Test-Path -LiteralPath $spritePath)) { return $null }
+
+        $resolved = (Resolve-Path -LiteralPath $spritePath).ProviderPath
+        $bitmap = New-Object Windows.Media.Imaging.BitmapImage
+        $bitmap.BeginInit()
+        $bitmap.CacheOption = [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+        $bitmap.CreateOptions = [Windows.Media.Imaging.BitmapCreateOptions]::IgnoreColorProfile
+        $bitmap.UriSource = [Uri]::new($resolved, [UriKind]::Absolute)
+        $bitmap.EndInit()
+        $bitmap.Freeze()
+
+        if ($bitmap.PixelWidth -lt 1536 -or $bitmap.PixelHeight -lt 1872) { return $null }
+        return $bitmap
+    }
+    catch {
+        return $null
+    }
+}
+
+function Update-PetIdleFrame([switch]$Force) {
+    if ($null -eq $script:petImage -or $null -eq $script:petSpritesheet) { return }
+
+    $now = [DateTime]::UtcNow
+    if (-not $Force -and $now -lt $script:nextPetFrameUtc) { return }
+
+    try {
+        $frameCount = $script:petIdleDurations.Count
+        $frame = $script:petFrameIndex % $frameCount
+        $rect = New-Object Windows.Int32Rect ($frame * 192), 0, 192, 208
+        $crop = New-Object Windows.Media.Imaging.CroppedBitmap -ArgumentList $script:petSpritesheet, $rect
+        $crop.Freeze()
+        $script:petImage.Source = $crop
+
+        $delay = [int]$script:petIdleDurations[$frame]
+        $script:petFrameIndex = ($frame + 1) % $frameCount
+        $script:nextPetFrameUtc = $now.AddMilliseconds($delay)
+    }
+    catch {}
+}
+
+function New-PetView {
+    $script:petSpritesheet = Load-PetSpritesheet
+    if ($null -eq $script:petSpritesheet) { return $null }
+
+    $image = New-Object Windows.Controls.Image
+    $image.Width = 144
+    $image.Height = 156
+    $image.Stretch = [Windows.Media.Stretch]::Uniform
+    $image.SnapsToDevicePixels = $true
+    $image.IsHitTestVisible = $false
+    $image.Margin = New-Object Windows.Thickness 0, 0, 10, 0
+    $image.VerticalAlignment = [Windows.VerticalAlignment]::Bottom
+    $image.SetValue([Windows.Media.RenderOptions]::BitmapScalingModeProperty, [Windows.Media.BitmapScalingMode]::NearestNeighbor)
+    $image.SetValue([Windows.Media.RenderOptions]::EdgeModeProperty, [Windows.Media.EdgeMode]::Aliased)
+
+    $script:petImage = $image
+    $script:petIdleDurations = @(280, 110, 110, 140, 140, 320)
+    $script:petFrameIndex = 0
+    $script:nextPetFrameUtc = [DateTime]::MinValue
+    Update-PetIdleFrame -Force
+    return $image
+}
+
 function New-BubbleItem([string]$Id) {
     $outer = New-Object Windows.Controls.Grid
     $outer.Margin = New-Object Windows.Thickness 0, 0, 0, 7
@@ -543,13 +650,32 @@ $window.SizeToContent = [Windows.SizeToContent]::WidthAndHeight
 $window.Left = $x
 $window.Top = $y
 $window.MinWidth = 260
-$window.MaxWidth = 520
+$window.MaxWidth = 720
 $window.UseLayoutRounding = $true
+
+$rootGrid = New-Object Windows.Controls.Grid
+$rootGrid.Margin = New-Object Windows.Thickness 0
+
+$petColumn = New-Object Windows.Controls.ColumnDefinition
+$petColumn.Width = [Windows.GridLength]::Auto
+$bubbleColumn = New-Object Windows.Controls.ColumnDefinition
+$bubbleColumn.Width = [Windows.GridLength]::Auto
+$rootGrid.ColumnDefinitions.Add($petColumn) | Out-Null
+$rootGrid.ColumnDefinitions.Add($bubbleColumn) | Out-Null
+
+$petView = New-PetView
+if ($null -ne $petView) {
+    [Windows.Controls.Grid]::SetColumn($petView, 0)
+    $rootGrid.Children.Add($petView) | Out-Null
+}
 
 $stack = New-Object Windows.Controls.StackPanel
 $stack.Orientation = [Windows.Controls.Orientation]::Vertical
 $stack.Margin = New-Object Windows.Thickness 0
-$window.Content = $stack
+[Windows.Controls.Grid]::SetColumn($stack, 1)
+$rootGrid.Children.Add($stack) | Out-Null
+
+$window.Content = $rootGrid
 
 $window.Add_SourceInitialized({
     try { $script:windowHandle = (New-Object System.Windows.Interop.WindowInteropHelper -ArgumentList $window).Handle } catch {}
@@ -603,9 +729,15 @@ $timer.Add_Tick({
 })
 $timer.Start()
 
+$petTimer = New-Object Windows.Threading.DispatcherTimer
+$petTimer.Interval = [TimeSpan]::FromMilliseconds(60)
+$petTimer.Add_Tick({ try { Update-PetIdleFrame } catch {} })
+$petTimer.Start()
+
 $window.Add_Closed({
     try { Save-State } catch {}
     try { $timer.Stop() } catch {}
+    try { $petTimer.Stop() } catch {}
     try { $mutex.ReleaseMutex() } catch {}
     try { $mutex.Dispose() } catch {}
 })

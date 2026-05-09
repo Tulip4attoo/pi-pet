@@ -3,6 +3,13 @@
 tmp/
 *.log
 
+# User-installed Petdex/Codex pets are runtime cache.
+# Keep committed defaults, if any, under pets/default/.
+pets/*
+!pets/.gitkeep
+!pets/default/
+!pets/default/**
+
 # PowerShell/editor temp
 *.tmp
 *.bak
