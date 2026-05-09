@@ -24,6 +24,7 @@ package.json                   pi package manifest
 extensions/pet-bubble.ts       pi extension hooking session events
 pet-bubble.ps1                 Windows WPF overlay manager
 pet-bubble.sh                  WSL wrapper/command writer
+pets/default/                  bundled default Einstein pet
 show-overlay.ps1               standalone image overlay helper
 show-overlay.sh                WSL wrapper for image overlay
 ```

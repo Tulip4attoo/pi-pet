@@ -1,0 +1,7 @@
+{
+  "id": "default",
+  "displayName": "Einstein",
+  "description": "A tiny Einstein-inspired chibi scientist companion for thoughtful coding sessions.",
+  "spritesheetPath": "spritesheet.clean.png",
+  "sourceSpritesheetPath": "spritesheet.webp"
+}
