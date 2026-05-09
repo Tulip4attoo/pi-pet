@@ -8,7 +8,7 @@ param(
     [double]$DefaultX = 120,
     [double]$DefaultY = 120,
 
-    [string]$ManagerVersion = "9"
+    [string]$ManagerVersion = "12"
 )
 
 $ErrorActionPreference = "Stop"
@@ -421,27 +421,265 @@ function Update-PetIdleFrame([switch]$Force) {
     catch {}
 }
 
+function Get-UsageRingColor([double]$RemainingPercent, [string]$Role) {
+    if ($RemainingPercent -le 12) { return [Windows.Media.BrushConverter]::new().ConvertFromString("#FFF87171") }
+    if ($RemainingPercent -le 30) { return [Windows.Media.BrushConverter]::new().ConvertFromString("#FFFBBF24") }
+    if ($Role -eq "secondary") { return [Windows.Media.BrushConverter]::new().ConvertFromString("#FF60A5FA") }
+    return [Windows.Media.BrushConverter]::new().ConvertFromString("#FF34D399")
+}
+
+function Get-UsageRingPoint([double]$CenterX, [double]$CenterY, [double]$Radius, [double]$Percent) {
+    $clamped = [Math]::Max(1.8, [Math]::Min(100.0, $Percent))
+    # Match the Codex pet reference: the arc starts at the pet's feet (6 o'clock)
+    # and grows counterclockwise, so the endpoint moves up the right side first.
+    $angle = (90.0 - ($clamped / 100.0 * 360.0)) * [Math]::PI / 180.0
+    return New-Object Windows.Point ($CenterX + [Math]::Cos($angle) * $Radius), ($CenterY + [Math]::Sin($angle) * $Radius)
+}
+
+function New-UsageArcGeometry([double]$CenterX, [double]$CenterY, [double]$Radius, [double]$Percent) {
+    $clamped = [Math]::Max(0.0, [Math]::Min(100.0, $Percent))
+    if ($clamped -le 0.01) { return [Windows.Media.Geometry]::Empty }
+
+    $start = New-Object Windows.Point $CenterX, ($CenterY + $Radius)
+    $geometry = New-Object Windows.Media.PathGeometry
+    $figure = New-Object Windows.Media.PathFigure
+    $figure.StartPoint = $start
+    $figure.IsClosed = $false
+    $figure.IsFilled = $false
+
+    if ($clamped -ge 99.9) {
+        $mid = New-Object Windows.Point $CenterX, ($CenterY - $Radius)
+        $segment1 = New-Object Windows.Media.ArcSegment
+        $segment1.Point = $mid
+        $segment1.Size = New-Object Windows.Size $Radius, $Radius
+        $segment1.SweepDirection = [Windows.Media.SweepDirection]::Counterclockwise
+        $segment1.IsLargeArc = $false
+        $segment2 = New-Object Windows.Media.ArcSegment
+        $segment2.Point = $start
+        $segment2.Size = New-Object Windows.Size $Radius, $Radius
+        $segment2.SweepDirection = [Windows.Media.SweepDirection]::Counterclockwise
+        $segment2.IsLargeArc = $false
+        $figure.Segments.Add($segment1) | Out-Null
+        $figure.Segments.Add($segment2) | Out-Null
+    }
+    else {
+        $point = Get-UsageRingPoint $CenterX $CenterY $Radius $clamped
+        $segment = New-Object Windows.Media.ArcSegment
+        $segment.Point = $point
+        $segment.Size = New-Object Windows.Size $Radius, $Radius
+        $segment.SweepDirection = [Windows.Media.SweepDirection]::Counterclockwise
+        $segment.IsLargeArc = $clamped -gt 50.0
+        $figure.Segments.Add($segment) | Out-Null
+    }
+
+    $geometry.Figures.Add($figure) | Out-Null
+    return $geometry
+}
+
+function New-UsageLabel {
+    $border = New-Object Windows.Controls.Border
+    $border.Width = 54
+    $border.Height = 28
+    $border.CornerRadius = New-Object Windows.CornerRadius 10
+    $border.BorderThickness = New-Object Windows.Thickness 1
+    $border.Background = [Windows.Media.BrushConverter]::new().ConvertFromString("#D90B1220")
+    $border.Visibility = [Windows.Visibility]::Collapsed
+    $border.IsHitTestVisible = $false
+
+    $text = New-Object Windows.Controls.TextBlock
+    $text.FontFamily = New-Object Windows.Media.FontFamily "Segoe UI"
+    $text.FontSize = 15
+    $text.FontWeight = [Windows.FontWeights]::Bold
+    $text.Foreground = [Windows.Media.Brushes]::White
+    $text.HorizontalAlignment = [Windows.HorizontalAlignment]::Center
+    $text.VerticalAlignment = [Windows.VerticalAlignment]::Center
+    $text.TextAlignment = [Windows.TextAlignment]::Center
+    $border.Child = $text
+    return $border
+}
+
+function Format-UsagePercent([double]$Percent) {
+    return ("{0}%" -f [Math]::Round([Math]::Max(0.0, [Math]::Min(100.0, $Percent))))
+}
+
+function Set-UsageLabel($Label, [double]$CenterX, [double]$CenterY, [double]$Radius, [double]$Percent, $Brush, [double]$CanvasSize) {
+    if ($null -eq $Label) { return }
+    $Label.Child.Text = Format-UsagePercent $Percent
+    $Label.BorderBrush = $Brush
+    $point = Get-UsageRingPoint $CenterX $CenterY $Radius $Percent
+    $left = [Math]::Max(0, [Math]::Min($CanvasSize - $Label.Width, $point.X - ($Label.Width / 2)))
+    $top = [Math]::Max(0, [Math]::Min($CanvasSize - $Label.Height, $point.Y - ($Label.Height / 2)))
+    [Windows.Controls.Canvas]::SetLeft($Label, $left)
+    [Windows.Controls.Canvas]::SetTop($Label, $top)
+}
+
+function Set-UsageRingVisibility([Windows.Visibility]$Visibility) {
+    foreach ($element in @($script:outerUsageTrack, $script:innerUsageTrack, $script:outerUsagePath, $script:innerUsagePath, $script:outerUsageLabel, $script:innerUsageLabel)) {
+        if ($null -ne $element) { $element.Visibility = $Visibility }
+    }
+}
+
+function Find-UsageLimit($Usage, [string[]]$Labels, [int]$FallbackIndex) {
+    if ($null -eq $Usage -or -not ($Usage.PSObject.Properties.Name -contains "limits")) { return $null }
+    $limits = @($Usage.limits)
+    foreach ($label in $Labels) {
+        $match = $limits | Where-Object { $_.label -and ([string]$_.label).ToLowerInvariant() -eq $label.ToLowerInvariant() } | Select-Object -First 1
+        if ($null -ne $match) { return $match }
+    }
+    if ($limits.Count -gt $FallbackIndex) { return $limits[$FallbackIndex] }
+    return $null
+}
+
+function Update-UsageRings($Usage) {
+    if ($null -eq $script:outerUsagePath -or $null -eq $script:innerUsagePath) { return }
+
+    $primary = Find-UsageLimit $Usage @("5h", "primary") 0
+    $secondary = Find-UsageLimit $Usage @("7d", "weekly", "secondary") 1
+    if ($null -eq $primary -and $null -eq $secondary) {
+        Set-UsageRingVisibility ([Windows.Visibility]::Collapsed)
+        return
+    }
+
+    Set-UsageRingVisibility ([Windows.Visibility]::Visible)
+    $center = if ($script:petRingCenter) { [double]$script:petRingCenter } else { 95.0 }
+    $outerRadius = if ($script:petOuterRingRadius) { [double]$script:petOuterRingRadius } else { 82.0 }
+    $innerRadius = if ($script:petInnerRingRadius) { [double]$script:petInnerRingRadius } else { 69.0 }
+    $canvasSize = if ($script:petRingSize) { [double]$script:petRingSize } else { 190.0 }
+    $labelsMode = ([string]$env:PI_PET_USAGE_LABELS).ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($labelsMode)) { $labelsMode = "always" }
+
+    if ($null -ne $primary) {
+        $percent = [double]$primary.remainingPercent
+        $brush = Get-UsageRingColor $percent "primary"
+        $script:outerUsagePath.Data = New-UsageArcGeometry $center $center $outerRadius $percent
+        $script:outerUsagePath.Stroke = $brush
+        if ($labelsMode -eq "off") { $script:outerUsageLabel.Visibility = [Windows.Visibility]::Collapsed }
+        else {
+            $script:outerUsageLabel.Visibility = [Windows.Visibility]::Visible
+            Set-UsageLabel $script:outerUsageLabel $center $center $outerRadius $percent $brush $canvasSize
+        }
+    }
+    else {
+        $script:outerUsagePath.Visibility = [Windows.Visibility]::Collapsed
+        $script:outerUsageLabel.Visibility = [Windows.Visibility]::Collapsed
+    }
+
+    if ($null -ne $secondary) {
+        $percent = [double]$secondary.remainingPercent
+        $brush = Get-UsageRingColor $percent "secondary"
+        $script:innerUsagePath.Data = New-UsageArcGeometry $center $center $innerRadius $percent
+        $script:innerUsagePath.Stroke = $brush
+        if ($labelsMode -eq "off") { $script:innerUsageLabel.Visibility = [Windows.Visibility]::Collapsed }
+        else {
+            $script:innerUsageLabel.Visibility = [Windows.Visibility]::Visible
+            Set-UsageLabel $script:innerUsageLabel $center $center $innerRadius $percent $brush $canvasSize
+        }
+    }
+    else {
+        $script:innerUsagePath.Visibility = [Windows.Visibility]::Collapsed
+        $script:innerUsageLabel.Visibility = [Windows.Visibility]::Collapsed
+    }
+}
+
+function New-UsageEllipse([double]$Radius, [double]$Center, [double]$Thickness, [string]$Color) {
+    $ellipse = New-Object Windows.Shapes.Ellipse
+    $ellipse.Width = $Radius * 2
+    $ellipse.Height = $Radius * 2
+    $ellipse.StrokeThickness = $Thickness
+    $ellipse.Stroke = [Windows.Media.BrushConverter]::new().ConvertFromString($Color)
+    $ellipse.Visibility = [Windows.Visibility]::Collapsed
+    $ellipse.IsHitTestVisible = $false
+    [Windows.Controls.Canvas]::SetLeft($ellipse, $Center - $Radius)
+    [Windows.Controls.Canvas]::SetTop($ellipse, $Center - $Radius)
+    return $ellipse
+}
+
+function New-UsagePath([double]$Thickness) {
+    $path = New-Object Windows.Shapes.Path
+    $path.StrokeThickness = $Thickness
+    $path.StrokeStartLineCap = [Windows.Media.PenLineCap]::Round
+    $path.StrokeEndLineCap = [Windows.Media.PenLineCap]::Round
+    $path.StrokeLineJoin = [Windows.Media.PenLineJoin]::Round
+    $path.Visibility = [Windows.Visibility]::Collapsed
+    $path.IsHitTestVisible = $false
+    return $path
+}
+
 function New-PetView {
     $script:petSpritesheet = Load-PetSpritesheet
     if ($null -eq $script:petSpritesheet) { return $null }
 
+    $script:petCellWidth = 192.0
+    $script:petCellHeight = 208.0
+    $scale = 0.75
+    try {
+        if (-not [string]::IsNullOrWhiteSpace([string]$env:PI_PET_SCALE)) {
+            $scale = [double]$env:PI_PET_SCALE
+        }
+    } catch { $scale = 0.75 }
+    $scale = [Math]::Max(0.35, [Math]::Min(2.0, $scale))
+
+    $script:petRenderWidth = [Math]::Round($script:petCellWidth * $scale, 0)
+    $script:petRenderHeight = [Math]::Round($script:petCellHeight * $scale, 0)
+    # Keep the rings comfortably outside the pet silhouette. A smaller ring looks
+    # clipped/covered for tall Codex cells, especially standing pets like Einstein.
+    $ringPadding = [Math]::Max(70.0, [Math]::Round([Math]::Max($script:petRenderWidth, $script:petRenderHeight) * 0.50, 0))
+    $ringMargin = [Math]::Max(14.0, [Math]::Round($ringPadding * 0.22, 0))
+    $ringGap = [Math]::Max(14.0, [Math]::Round($ringPadding * 0.18, 0))
+    $script:petRingSize = [Math]::Round([Math]::Max($script:petRenderWidth, $script:petRenderHeight) + $ringPadding, 0)
+    $script:petRingCenter = $script:petRingSize / 2.0
+    $script:petOuterRingRadius = $script:petRingCenter - $ringMargin
+    $script:petInnerRingRadius = $script:petOuterRingRadius - $ringGap
+
+    $root = New-Object Windows.Controls.Grid
+    $root.Width = $script:petRingSize
+    $root.Height = $script:petRingSize
+    $root.Margin = New-Object Windows.Thickness 0, 0, 10, 0
+    $root.VerticalAlignment = [Windows.VerticalAlignment]::Bottom
+    $root.IsHitTestVisible = $false
+
+    $ringCanvas = New-Object Windows.Controls.Canvas
+    $ringCanvas.Width = $script:petRingSize
+    $ringCanvas.Height = $script:petRingSize
+
+    $script:outerUsageTrack = New-UsageEllipse $script:petOuterRingRadius $script:petRingCenter 7 "#3AFFFFFF"
+    $script:innerUsageTrack = New-UsageEllipse $script:petInnerRingRadius $script:petRingCenter 5 "#28FFFFFF"
+    $script:outerUsagePath = New-UsagePath 7
+    $script:innerUsagePath = New-UsagePath 5
+
+    $ringCanvas.Children.Add($script:outerUsageTrack) | Out-Null
+    $ringCanvas.Children.Add($script:innerUsageTrack) | Out-Null
+    $ringCanvas.Children.Add($script:outerUsagePath) | Out-Null
+    $ringCanvas.Children.Add($script:innerUsagePath) | Out-Null
+    $root.Children.Add($ringCanvas) | Out-Null
+
     $image = New-Object Windows.Controls.Image
-    $image.Width = 144
-    $image.Height = 156
+    $image.Width = $script:petRenderWidth
+    $image.Height = $script:petRenderHeight
     $image.Stretch = [Windows.Media.Stretch]::Uniform
     $image.SnapsToDevicePixels = $true
     $image.IsHitTestVisible = $false
-    $image.Margin = New-Object Windows.Thickness 0, 0, 10, 0
-    $image.VerticalAlignment = [Windows.VerticalAlignment]::Bottom
+    $image.HorizontalAlignment = [Windows.HorizontalAlignment]::Center
+    $image.VerticalAlignment = [Windows.VerticalAlignment]::Center
     $image.SetValue([Windows.Media.RenderOptions]::BitmapScalingModeProperty, [Windows.Media.BitmapScalingMode]::NearestNeighbor)
     $image.SetValue([Windows.Media.RenderOptions]::EdgeModeProperty, [Windows.Media.EdgeMode]::Aliased)
+    $root.Children.Add($image) | Out-Null
+
+    $labelCanvas = New-Object Windows.Controls.Canvas
+    $labelCanvas.Width = $script:petRingSize
+    $labelCanvas.Height = $script:petRingSize
+    $script:outerUsageLabel = New-UsageLabel
+    $script:innerUsageLabel = New-UsageLabel
+    $labelCanvas.Children.Add($script:outerUsageLabel) | Out-Null
+    $labelCanvas.Children.Add($script:innerUsageLabel) | Out-Null
+    $root.Children.Add($labelCanvas) | Out-Null
 
     $script:petImage = $image
     $script:petIdleDurations = @(280, 110, 110, 140, 140, 320)
     $script:petFrameIndex = 0
     $script:nextPetFrameUtc = [DateTime]::MinValue
     Update-PetIdleFrame -Force
-    return $image
+    return $root
 }
 
 function New-BubbleItem([string]$Id) {
@@ -626,6 +864,41 @@ function Scan-Commands {
     }
 }
 
+function Scan-Usage {
+    Ensure-Directory $RootPath
+    $dirs = Get-ChildItem -LiteralPath $RootPath -Directory -ErrorAction SilentlyContinue
+    $latest = $null
+    $latestScore = -1.0
+    $latestKey = ""
+
+    foreach ($dir in $dirs) {
+        $usagePath = Join-Path $dir.FullName "usage.json"
+        if (-not (Test-Path -LiteralPath $usagePath)) { continue }
+
+        $file = Get-Item -LiteralPath $usagePath -ErrorAction SilentlyContinue
+        if ($null -eq $file) { continue }
+
+        $usage = Read-JsonFile $usagePath
+        if ($null -eq $usage) { continue }
+
+        $score = [double]$file.LastWriteTimeUtc.Ticks
+        if ($usage.PSObject.Properties.Name -contains "fetchedAt") {
+            try { $score = [double]$usage.fetchedAt } catch {}
+        }
+
+        if ($score -gt $latestScore) {
+            $latest = $usage
+            $latestScore = $score
+            $latestKey = "$($dir.Name):$score"
+        }
+    }
+
+    if ($latestKey -ne $script:lastUsageKey) {
+        $script:lastUsageKey = $latestKey
+        Update-UsageRings $latest
+    }
+}
+
 Ensure-Directory $RootPath
 Ensure-ParentDirectory $StatePath
 $script:wslRoot = Get-WslRootFromUnc $RootPath
@@ -713,6 +986,7 @@ $window.Add_KeyDown({
 })
 
 Scan-Commands
+Scan-Usage
 
 $timer = New-Object Windows.Threading.DispatcherTimer
 $script:lastWatchdogUtc = [DateTime]::MinValue
@@ -720,6 +994,7 @@ $timer.Interval = [TimeSpan]::FromMilliseconds(250)
 $timer.Add_Tick({
     try {
         Scan-Commands
+        Scan-Usage
         $now = [DateTime]::UtcNow
         if (($now - $script:lastWatchdogUtc).TotalSeconds -ge 1) {
             $script:lastWatchdogUtc = $now
