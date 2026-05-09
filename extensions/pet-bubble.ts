@@ -115,6 +115,11 @@ function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isCodexModel(ctx: ExtensionContext, modelOverride?: unknown): boolean {
+  const model = modelOverride ?? (ctx as any)?.model;
+  return isRecord(model) && model.provider === PROVIDER_ID;
+}
+
 function parseNumber(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string") {
@@ -334,18 +339,36 @@ async function fetchUsageSummary(token: string, accountId?: string): Promise<Usa
   }
 }
 
-async function writeUsageFile(summary: UsageSummary): Promise<void> {
+async function writeUsagePayload(payload: JsonRecord): Promise<void> {
   await mkdir(dirname(usageFile), { recursive: true, mode: 0o700 });
   const tmp = `${usageFile}.${process.pid}.${Date.now()}.tmp`;
-  const payload = { seq: Date.now(), source: "live", ...summary };
   await writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   await rename(tmp, usageFile);
 }
 
-async function refreshUsage(ctx: ExtensionContext, options?: { refresh?: boolean }): Promise<void> {
+async function writeUsageFile(summary: UsageSummary): Promise<void> {
+  await writeUsagePayload({ seq: Date.now(), source: "live", ...summary });
+}
+
+async function hideUsageRings(reason: string): Promise<void> {
+  const now = Date.now();
+  await writeUsagePayload({ seq: now, source: "disabled", disabled: true, reason, limits: [], fetchedAt: now });
+}
+
+async function refreshUsage(ctx: ExtensionContext, options?: { refresh?: boolean; model?: unknown }): Promise<void> {
   try {
+    if (!isCodexModel(ctx, options?.model)) {
+      usageCache = { expiresAt: 0 };
+      await hideUsageRings("non-codex-model");
+      return;
+    }
+
     const resolved = await resolveCodexToken(ctx);
-    if (!resolved) return;
+    if (!resolved) {
+      usageCache = { expiresAt: Date.now() + USAGE_ERROR_CACHE_TTL_MS };
+      await hideUsageRings("no-codex-token");
+      return;
+    }
 
     const now = Date.now();
     if (!options?.refresh && usageCache.token === resolved.token && usageCache.summary && usageCache.expiresAt > now) {
@@ -353,17 +376,26 @@ async function refreshUsage(ctx: ExtensionContext, options?: { refresh?: boolean
       return;
     }
     if (!options?.refresh && usageCache.token === resolved.token && usageCache.promise) {
-      await writeUsageFile(await usageCache.promise);
+      const summary = await usageCache.promise;
+      if (summary.limits.length === 0) await hideUsageRings("no-usage-limits");
+      else await writeUsageFile(summary);
       return;
     }
 
     const promise = fetchUsageSummary(resolved.token, resolved.accountId);
     usageCache = { token: resolved.token, expiresAt: now + USAGE_CACHE_TTL_MS, promise };
     const summary = await promise;
+    if (summary.limits.length === 0) {
+      usageCache = { token: resolved.token, expiresAt: Date.now() + USAGE_ERROR_CACHE_TTL_MS };
+      await hideUsageRings("no-usage-limits");
+      return;
+    }
+
     usageCache = { token: resolved.token, expiresAt: Date.now() + USAGE_CACHE_TTL_MS, summary };
     await writeUsageFile(summary);
   } catch {
     usageCache = { token: usageCache.token, expiresAt: Date.now() + USAGE_ERROR_CACHE_TTL_MS };
+    try { await hideUsageRings("usage-refresh-failed"); } catch {}
     // Usage rings are cosmetic; never break pi because usage failed.
   }
 }
@@ -710,6 +742,10 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     runBubble(ctx.cwd, ["start", "finished", "Ready"]);
     void refreshUsage(ctx, { refresh: true });
+  });
+
+  pi.on("model_select", async (event, ctx) => {
+    void refreshUsage(ctx, { refresh: true, model: (event as any).model });
   });
 
   pi.on("agent_start", async (_event, ctx) => {
