@@ -1,6 +1,6 @@
 {
   "name": "pi-pet-bubble",
-  "version": "0.1.0",
+  "version": "0.2.10",
   "description": "Windows status bubble overlay extension for pi running in WSL.",
   "type": "module",
   "keywords": ["pi-package", "pi", "extension", "wsl", "overlay"],

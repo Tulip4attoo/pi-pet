@@ -8,7 +8,7 @@ param(
     [double]$DefaultX = 120,
     [double]$DefaultY = 120,
 
-    [string]$ManagerVersion = "12"
+    [string]$ManagerVersion = "0.2.10"
 )
 
 $ErrorActionPreference = "Stop"
@@ -265,6 +265,30 @@ function Get-BubbleIdFromSource($Source) {
     return $null
 }
 
+function Test-SourceWithinPetView($Source) {
+    if ($null -eq $script:petViewRoot) { return $false }
+
+    $current = $Source
+    while ($null -ne $current) {
+        if ([object]::ReferenceEquals($current, $script:petViewRoot)) { return $true }
+        try { $current = [Windows.Media.VisualTreeHelper]::GetParent($current) } catch { return $false }
+    }
+    return $false
+}
+
+function Activate-DefaultBubbleTarget {
+    if ($items.Count -eq 0) { return }
+
+    $target = $null
+    foreach ($item in $items.Values) {
+        if ($null -eq $target -or $item.LastWriteUtc -gt $target.LastWriteUtc) {
+            $target = $item
+        }
+    }
+
+    if ($null -ne $target) { Activate-BubbleTarget ([string]$target.Id) }
+}
+
 function Test-WslPidActive($Command) {
     if ($null -eq $Command) { return $true }
     if (-not ($Command.PSObject.Properties.Name -contains "pid")) { return $true }
@@ -313,6 +337,42 @@ function Set-WindowInsideVirtualScreen {
 
         if ($window.Top -lt $minTop) { $window.Top = $minTop }
         elseif ($window.Top -gt $maxTop) { $window.Top = $maxTop }
+    }
+    catch {}
+}
+
+function Get-DefaultWindowPosition([double]$Width, [double]$Height) {
+    try {
+        $screenLeft = [Windows.SystemParameters]::VirtualScreenLeft
+        $screenTop = [Windows.SystemParameters]::VirtualScreenTop
+        $screenWidth = [Windows.SystemParameters]::VirtualScreenWidth
+        $screenHeight = [Windows.SystemParameters]::VirtualScreenHeight
+        $screenRight = $screenLeft + $screenWidth
+        $screenBottom = $screenTop + $screenHeight
+
+        $safeWidth = [Math]::Max(260.0, $Width)
+        $safeHeight = [Math]::Max(120.0, $Height)
+        $marginX = [Math]::Max(56.0, [Math]::Min(180.0, [Math]::Round($screenWidth * 0.045, 0)))
+        $marginY = [Math]::Max(64.0, [Math]::Min(180.0, [Math]::Round($screenHeight * 0.075, 0)))
+
+        return @{
+            x = [Math]::Max($screenLeft, $screenRight - $safeWidth - $marginX)
+            y = [Math]::Max($screenTop, $screenBottom - $safeHeight - $marginY)
+        }
+    }
+    catch {
+        return @{ x = $DefaultX; y = $DefaultY }
+    }
+}
+
+function Move-WindowToDefaultPosition {
+    try {
+        $width = if ($window.ActualWidth -gt 0) { $window.ActualWidth } elseif ($window.Width -gt 0) { $window.Width } else { 600 }
+        $height = if ($window.ActualHeight -gt 0) { $window.ActualHeight } elseif ($window.Height -gt 0) { $window.Height } else { 260 }
+        $position = Get-DefaultWindowPosition $width $height
+        $window.Left = [double]$position.x
+        $window.Top = [double]$position.y
+        Set-WindowInsideVirtualScreen
     }
     catch {}
 }
@@ -546,7 +606,7 @@ function Update-UsageRings($Usage) {
     $innerRadius = if ($script:petInnerRingRadius) { [double]$script:petInnerRingRadius } else { 69.0 }
     $canvasSize = if ($script:petRingSize) { [double]$script:petRingSize } else { 190.0 }
     $labelsMode = ([string]$env:PI_PET_USAGE_LABELS).ToLowerInvariant()
-    if ([string]::IsNullOrWhiteSpace($labelsMode)) { $labelsMode = "always" }
+    if ([string]::IsNullOrWhiteSpace($labelsMode)) { $labelsMode = "off" }
 
     if ($null -ne $primary) {
         $percent = [double]$primary.remainingPercent
@@ -611,12 +671,12 @@ function New-PetView {
 
     $script:petCellWidth = 192.0
     $script:petCellHeight = 208.0
-    $scale = 0.75
+    $scale = 0.5
     try {
         if (-not [string]::IsNullOrWhiteSpace([string]$env:PI_PET_SCALE)) {
             $scale = [double]$env:PI_PET_SCALE
         }
-    } catch { $scale = 0.75 }
+    } catch { $scale = 0.5 }
     $scale = [Math]::Max(0.35, [Math]::Min(2.0, $scale))
 
     $script:petRenderWidth = [Math]::Round($script:petCellWidth * $scale, 0)
@@ -625,7 +685,7 @@ function New-PetView {
     # clipped/covered for tall Codex cells, especially standing pets like Einstein.
     $ringPadding = [Math]::Max(70.0, [Math]::Round([Math]::Max($script:petRenderWidth, $script:petRenderHeight) * 0.50, 0))
     $ringMargin = [Math]::Max(14.0, [Math]::Round($ringPadding * 0.22, 0))
-    $ringGap = [Math]::Max(14.0, [Math]::Round($ringPadding * 0.18, 0))
+    $ringGap = [Math]::Max(10.0, [Math]::Round($ringPadding * 0.14, 0))
     $script:petRingSize = [Math]::Round([Math]::Max($script:petRenderWidth, $script:petRenderHeight) + $ringPadding, 0)
     $script:petRingCenter = $script:petRingSize / 2.0
     $script:petOuterRingRadius = $script:petRingCenter - $ringMargin
@@ -636,7 +696,9 @@ function New-PetView {
     $root.Height = $script:petRingSize
     $root.Margin = New-Object Windows.Thickness 0, 0, 10, 0
     $root.VerticalAlignment = [Windows.VerticalAlignment]::Bottom
-    $root.IsHitTestVisible = $false
+    $root.Background = [Windows.Media.Brushes]::Transparent
+    $root.IsHitTestVisible = $true
+    $script:petViewRoot = $root
 
     $ringCanvas = New-Object Windows.Controls.Canvas
     $ringCanvas.Width = $script:petRingSize
@@ -904,11 +966,21 @@ Ensure-ParentDirectory $StatePath
 $script:wslRoot = Get-WslRootFromUnc $RootPath
 
 $state = Read-JsonFile $StatePath
-$x = if ($state -and ($state.PSObject.Properties.Name -contains "x")) { [double]$state.x } else { $DefaultX }
-$y = if ($state -and ($state.PSObject.Properties.Name -contains "y")) { [double]$state.y } else { $DefaultY }
+$hasSavedPosition = $state -and ($state.PSObject.Properties.Name -contains "x") -and ($state.PSObject.Properties.Name -contains "y")
+if ($hasSavedPosition) {
+    $x = [double]$state.x
+    $y = [double]$state.y
+}
+else {
+    $initialPosition = Get-DefaultWindowPosition 600 260
+    $x = [double]$initialPosition.x
+    $y = [double]$initialPosition.y
+}
 
 $items = @{}
 $script:windowHandle = [IntPtr]::Zero
+$script:petViewRoot = $null
+$script:usingDefaultPosition = -not $hasSavedPosition
 
 $window = New-Object Windows.Window
 $window.WindowStyle = [Windows.WindowStyle]::None
@@ -957,13 +1029,20 @@ $window.Add_SourceInitialized({
 })
 
 $window.Add_ContentRendered({
-    Set-WindowInsideVirtualScreen
+    if ($script:usingDefaultPosition) {
+        Move-WindowToDefaultPosition
+        $script:usingDefaultPosition = $false
+    }
+    else {
+        Set-WindowInsideVirtualScreen
+    }
     Save-State
 })
 
 $window.Add_MouseLeftButtonDown({
     if ($_.ButtonState -eq [Windows.Input.MouseButtonState]::Pressed) {
         $bubbleId = Get-BubbleIdFromSource $_.OriginalSource
+        $isPetClick = Test-SourceWithinPetView $_.OriginalSource
         $startLeft = $window.Left
         $startTop = $window.Top
 
@@ -971,8 +1050,13 @@ $window.Add_MouseLeftButtonDown({
         Save-State
 
         $moved = ([Math]::Abs($window.Left - $startLeft) -gt 3 -or [Math]::Abs($window.Top - $startTop) -gt 3)
-        if ($bubbleId -and -not $moved) {
-            Activate-BubbleTarget $bubbleId
+        if (-not $moved) {
+            if ($bubbleId) {
+                Activate-BubbleTarget $bubbleId
+            }
+            elseif ($isPetClick) {
+                Activate-DefaultBubbleTarget
+            }
         }
     }
 })
