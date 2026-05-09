@@ -127,7 +127,20 @@ function Get-CursorPosition {
     try {
         $point = New-Object PiPetBubbleWin32+POINT
         if ([PiPetBubbleWin32]::GetCursorPos([ref]$point)) {
-            return New-Object Windows.Point ([double]$point.X), ([double]$point.Y)
+            # GetCursorPos returns physical screen pixels, while WPF Window.Left/Top
+            # are device-independent pixels (DIPs). Convert to WPF units so drag
+            # distance stays in sync with the cursor on scaled displays (125%-200%).
+            $screenPoint = New-Object Windows.Point ([double]$point.X), ([double]$point.Y)
+            try {
+                if ($null -ne $window) {
+                    $source = [Windows.PresentationSource]::FromVisual($window)
+                    if ($null -ne $source -and $null -ne $source.CompositionTarget) {
+                        return $source.CompositionTarget.TransformFromDevice.Transform($screenPoint)
+                    }
+                }
+            }
+            catch {}
+            return $screenPoint
         }
     }
     catch {}
