@@ -8,7 +8,7 @@ param(
     [double]$DefaultX = 120,
     [double]$DefaultY = 120,
 
-    [string]$ManagerVersion = "6"
+    [string]$ManagerVersion = "7"
 )
 
 $ErrorActionPreference = "Stop"
@@ -44,6 +44,16 @@ public static class PiPetBubbleWin32 {
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+
+    [DllImport("user32.dll")]
+    public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll")]
+    public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+    public const int GWL_EXSTYLE = -20;
+    public const int WS_EX_TOOLWINDOW = 0x00000080;
+    public const int WS_EX_NOACTIVATE = 0x08000000;
 }
 "@
 
@@ -113,6 +123,18 @@ function Get-OverlayWindowHandle {
     }
     catch {}
     return $script:windowHandle
+}
+
+function Set-OverlayNoActivate {
+    try {
+        $handle = Get-OverlayWindowHandle
+        if ($handle -eq [IntPtr]::Zero) { return }
+
+        $style = [PiPetBubbleWin32]::GetWindowLong($handle, [PiPetBubbleWin32]::GWL_EXSTYLE)
+        $style = $style -bor [PiPetBubbleWin32]::WS_EX_TOOLWINDOW -bor [PiPetBubbleWin32]::WS_EX_NOACTIVATE
+        [void][PiPetBubbleWin32]::SetWindowLong($handle, [PiPetBubbleWin32]::GWL_EXSTYLE, $style)
+    }
+    catch {}
 }
 
 function Get-CurrentForegroundTarget {
@@ -514,6 +536,8 @@ $window.ResizeMode = [Windows.ResizeMode]::NoResize
 $window.AllowsTransparency = $true
 $window.Background = [Windows.Media.Brushes]::Transparent
 $window.ShowInTaskbar = $false
+$window.ShowActivated = $false
+$window.Focusable = $false
 $window.Topmost = $true
 $window.SizeToContent = [Windows.SizeToContent]::WidthAndHeight
 $window.Left = $x
@@ -529,6 +553,7 @@ $window.Content = $stack
 
 $window.Add_SourceInitialized({
     try { $script:windowHandle = (New-Object System.Windows.Interop.WindowInteropHelper -ArgumentList $window).Handle } catch {}
+    Set-OverlayNoActivate
     Set-WindowInsideVirtualScreen
 })
 
