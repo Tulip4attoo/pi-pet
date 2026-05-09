@@ -663,7 +663,7 @@ function Get-UsageRingColor([double]$RemainingPercent, [string]$Role) {
 }
 
 function Get-UsageRingPoint([double]$CenterX, [double]$CenterY, [double]$Radius, [double]$Percent) {
-    $clamped = [Math]::Max(1.8, [Math]::Min(100.0, $Percent))
+    $clamped = [Math]::Max(0.0, [Math]::Min(100.0, $Percent))
     # Match the Codex pet reference: the arc starts at the pet's feet (6 o'clock)
     # and grows counterclockwise, so the endpoint moves up the right side first.
     $angle = (90.0 - ($clamped / 100.0 * 360.0)) * [Math]::PI / 180.0
@@ -831,8 +831,9 @@ function New-UsageEllipse([double]$Radius, [double]$Center, [double]$Thickness, 
 function New-UsagePath([double]$Thickness) {
     $path = New-Object Windows.Shapes.Path
     $path.StrokeThickness = $Thickness
-    $path.StrokeStartLineCap = [Windows.Media.PenLineCap]::Round
-    $path.StrokeEndLineCap = [Windows.Media.PenLineCap]::Round
+    # Use flat caps for usage arcs so very low percentages do not look inflated.
+    $path.StrokeStartLineCap = [Windows.Media.PenLineCap]::Flat
+    $path.StrokeEndLineCap = [Windows.Media.PenLineCap]::Flat
     $path.StrokeLineJoin = [Windows.Media.PenLineJoin]::Round
     $path.Visibility = [Windows.Visibility]::Collapsed
     $path.IsHitTestVisible = $false
