@@ -24,6 +24,7 @@ package.json                   pi package manifest
 extensions/pet-bubble.ts       pi extension hooking session events
 pet-bubble.ps1                 Windows WPF overlay manager
 pet-bubble.sh                  WSL wrapper/command writer
+pet-install.sh                 Petdex/Codex Pets pet pack installer
 pets/default/                  bundled default Einstein pet
 show-overlay.ps1               standalone image overlay helper
 show-overlay.sh                WSL wrapper for image overlay
@@ -93,6 +94,18 @@ Inside pi:
 /bubble stop
 ```
 
+Manage pets from inside pi:
+
+```text
+/pet install luffy
+/pet install https://codex-pets.net/#/pets/dario
+/pet use einstein
+/pet list
+/pet current
+```
+
+Bare `/pet install <name>` uses Petdex by default. A `codex-pets.net` URL installs from Codex Pets.
+
 ## Multi-instance behavior
 
 Each pi process gets a unique row based on its PID. Rows are rendered by one Windows overlay manager and stacked vertically. Clicking a row focuses the terminal window that was active when that row first wrote a bubble command.
@@ -103,6 +116,18 @@ Manual test:
 PI_PET_BUBBLE_ID=a PI_PET_BUBBLE_DIR=/project/a ./pet-bubble.sh thinking "Thinking A"
 PI_PET_BUBBLE_ID=b PI_PET_BUBBLE_DIR=/project/b ./pet-bubble.sh answering "Answering B"
 ```
+
+## Install pets
+
+Install a pet pack into `./pets/<slug>` and make it active:
+
+```bash
+./pet-install.sh luffy
+./pet-install.sh https://petdex.crafter.run/pets/luffy
+./pet-install.sh https://codex-pets.net/#/pets/dario
+```
+
+Bare names/slugs use Petdex by default. To install from Codex Pets, pass a `codex-pets.net` pet URL.
 
 ## Image overlay helper
 

@@ -7,15 +7,20 @@ pet_root="${PI_PET_PETS_DIR:-$script_dir/pets}"
 usage() {
   cat <<'EOF'
 Usage:
-  ./pet-install.sh <petdex-url-or-slug>
+  ./pet-install.sh <pet-url-or-petdex-slug>
 
 Examples:
-  ./pet-install.sh https://petdex.crafter.run/pets/luffy
   ./pet-install.sh luffy
+  ./pet-install.sh https://petdex.crafter.run/pets/luffy
+  ./pet-install.sh https://codex-pets.net/#/pets/dario
+  ./pet-install.sh https://codex-pets.net/pets/dario
 
 Downloads a Petdex/Codex-compatible pet pack and installs it into:
   ./pets/<slug>/pet.json
-  ./pets/<slug>/spritesheet.webp
+  ./pets/<slug>/spritesheet.webp (or cleaned spritesheet.clean.png)
+
+Bare names/slugs use Petdex by default. To install from Codex Pets,
+pass a codex-pets.net pet URL.
 
 Override install root with PI_PET_PETS_DIR=/path/to/pets.
 EOF
@@ -42,6 +47,9 @@ import zipfile
 import zlib
 from pathlib import Path
 
+PETDEX_BASE = "https://petdex.crafter.run"
+CODEX_PETS_BASE = "https://codex-pets.net"
+
 raw_target = sys.argv[1].strip()
 pet_root = Path(sys.argv[2]).expanduser().resolve()
 
@@ -56,31 +64,86 @@ def sanitize_slug(value: str) -> str:
     return slug
 
 
+def split_route_parts(path: str) -> list[str]:
+    path = path.split("?", 1)[0].split("#", 1)[0]
+    return [urllib.parse.unquote(p) for p in path.strip("/").split("/") if p]
+
+
+def is_codex_pets_url(target: str) -> bool:
+    parsed = urllib.parse.urlparse(target)
+    return parsed.scheme in {"http", "https"} and parsed.netloc.lower().removeprefix("www.") == "codex-pets.net"
+
+
 def slug_from_target(target: str) -> str:
     parsed = urllib.parse.urlparse(target)
     if parsed.scheme and parsed.netloc:
-        parts = [urllib.parse.unquote(p) for p in parsed.path.split("/") if p]
-        if "pets" in parts:
-            idx = parts.index("pets")
-            if idx + 1 < len(parts):
-                return sanitize_slug(parts[idx + 1])
-        if parts:
-            return sanitize_slug(parts[-1])
+        route_parts = split_route_parts(parsed.fragment) if parsed.fragment else []
+        if not route_parts:
+            route_parts = split_route_parts(parsed.path)
+
+        if "pets" in route_parts:
+            idx = route_parts.index("pets")
+            if idx + 1 < len(route_parts):
+                return sanitize_slug(route_parts[idx + 1])
+
+        # Codex Pets package download URLs look like /api/pets/<id>/download.
+        if len(route_parts) >= 3 and route_parts[0] == "api" and route_parts[1] == "pets":
+            return sanitize_slug(route_parts[2])
+
+        if route_parts:
+            return sanitize_slug(route_parts[-1])
         raise SystemExit(f"could not infer pet slug from URL: {target}")
     return sanitize_slug(target)
 
 
-def fetch(url: str) -> bytes:
+def fetch(url: str, accept: str = "text/html,application/xhtml+xml,application/xml,application/zip,image/webp,application/json,*/*") -> bytes:
+    referer = CODEX_PETS_BASE + "/" if urllib.parse.urlparse(url).netloc.lower().removeprefix("www.") == "codex-pets.net" else PETDEX_BASE + "/"
     req = urllib.request.Request(
         url,
         headers={
             "User-Agent": "Mozilla/5.0 (pi-pet installer)",
-            "Accept": "text/html,application/xhtml+xml,application/xml,application/zip,image/webp,*/*",
-            "Referer": "https://petdex.crafter.run/",
+            "Accept": accept,
+            "Referer": referer,
         },
     )
     with urllib.request.urlopen(req, timeout=30) as response:
         return response.read()
+
+
+def resolve_petdex_zip_url(target: str, slug: str) -> str:
+    page_url = target if urllib.parse.urlparse(target).scheme else f"{PETDEX_BASE}/pets/{slug}"
+    page_text = fetch(page_url).decode("utf-8", "ignore")
+    page_text = html.unescape(page_text)
+
+    zip_patterns = [
+        rf'https://[^"\\\s<>)]*/pets/{re.escape(slug)}-[^"\\\s<>)]*/zip\.zip',
+        r'"zipUrl"\s*:\s*"(https://[^"\\]+/zip\.zip)"',
+    ]
+    for pattern in zip_patterns:
+        match = re.search(pattern, page_text, re.IGNORECASE)
+        if match:
+            return (match.group(1) if match.lastindex else match.group(0)).replace("\\/", "/")
+
+    raise SystemExit(f"could not find Petdex zip URL on {page_url}")
+
+
+def resolve_codex_pets_zip_url(slug: str) -> str:
+    api_url = f"{CODEX_PETS_BASE}/api/pets/{urllib.parse.quote(slug)}"
+    try:
+        payload = json.loads(fetch(api_url, accept="application/json").decode("utf-8"))
+        pet = payload.get("pet") if isinstance(payload, dict) else None
+        if isinstance(pet, dict):
+            # Prefer the canonical id returned by the API if it differs only by redirects/aliases.
+            api_slug = pet.get("id")
+            if isinstance(api_slug, str) and api_slug.strip():
+                slug = sanitize_slug(api_slug)
+            download_url = pet.get("downloadUrl")
+            if isinstance(download_url, str) and download_url.strip():
+                return urllib.parse.urljoin(CODEX_PETS_BASE + "/", download_url)
+    except Exception as error:
+        print(f"pi-pet: warning: could not read Codex Pets API metadata: {error}", file=sys.stderr)
+
+    return f"{CODEX_PETS_BASE}/api/pets/{urllib.parse.quote(slug)}/download"
 
 
 def png_chunk(kind: bytes, data: bytes) -> bytes:
@@ -142,80 +205,78 @@ def clean_spritesheet_to_png(source: Path, output: Path) -> None:
     write_png_rgba(output, width, height, bytes(pixels))
 
 
+def install_zip(slug: str, zip_bytes: bytes) -> Path:
+    if len(zip_bytes) < 100:
+        raise SystemExit("downloaded zip is unexpectedly small")
+
+    pet_root.mkdir(parents=True, exist_ok=True)
+    dest = pet_root / slug
+    with tempfile.TemporaryDirectory(prefix=f".{slug}-", dir=str(pet_root)) as tmp_name:
+        tmp_dir = Path(tmp_name)
+        zip_path = tmp_dir / "pack.zip"
+        zip_path.write_bytes(zip_bytes)
+
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            if "pet.json" not in names:
+                raise SystemExit("pet pack does not contain pet.json")
+            pet_json = json.loads(zf.read("pet.json").decode("utf-8"))
+            manifest_id = pet_json.get("id")
+            if isinstance(manifest_id, str) and manifest_id.strip():
+                slug = sanitize_slug(manifest_id)
+                dest = pet_root / slug
+            sprite_name = pet_json.get("spritesheetPath") or "spritesheet.webp"
+            if sprite_name not in names:
+                # Some community packs use sprite.webp but still render on Petdex/Codex Pets.
+                webp_names = [name for name in names if name.lower().endswith((".webp", ".png"))]
+                if not webp_names:
+                    raise SystemExit("pet pack does not contain a spritesheet image")
+                sprite_name = webp_names[0]
+                pet_json["spritesheetPath"] = Path(sprite_name).name
+
+            install_dir = tmp_dir / slug
+            install_dir.mkdir(parents=True, exist_ok=True)
+            source_sprite_name = Path(sprite_name).name
+            source_sprite_path = install_dir / source_sprite_name
+            source_sprite_path.write_bytes(zf.read(sprite_name))
+
+            clean_sprite_name = "spritesheet.clean.png"
+            try:
+                clean_spritesheet_to_png(source_sprite_path, install_dir / clean_sprite_name)
+                pet_json["sourceSpritesheetPath"] = source_sprite_name
+                pet_json["spritesheetPath"] = clean_sprite_name
+                print(f"pi-pet: wrote clean PNG {clean_sprite_name}")
+            except Exception as error:
+                print(f"pi-pet: warning: could not create clean PNG: {error}", file=sys.stderr)
+                pet_json["spritesheetPath"] = source_sprite_name
+
+            (install_dir / "pet.json").write_text(json.dumps(pet_json, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.move(str(tmp_dir / slug), str(dest))
+
+    active_path = pet_root / "active"
+    active_path.write_text(slug + "\n", encoding="utf-8")
+    return dest
+
+
 slug = slug_from_target(raw_target)
-page_url = raw_target if urllib.parse.urlparse(raw_target).scheme else f"https://petdex.crafter.run/pets/{slug}"
-page_text = fetch(page_url).decode("utf-8", "ignore")
-page_text = html.unescape(page_text)
+if is_codex_pets_url(raw_target):
+    zip_url = resolve_codex_pets_zip_url(slug)
+    source_name = "Codex Pets"
+else:
+    zip_url = resolve_petdex_zip_url(raw_target, slug)
+    source_name = "Petdex"
 
-zip_patterns = [
-    rf'https://[^"\\\s<>)]*/pets/{re.escape(slug)}-[^"\\\s<>)]*/zip\.zip',
-    r'"zipUrl"\s*:\s*"(https://[^"\\]+/zip\.zip)"',
-]
-zip_url = None
-for pattern in zip_patterns:
-    match = re.search(pattern, page_text, re.IGNORECASE)
-    if match:
-        zip_url = match.group(1) if match.lastindex else match.group(0)
-        break
+print(f"pi-pet: resolved {slug} from {source_name} -> {zip_url}")
+zip_bytes = fetch(zip_url, accept="application/zip,*/*")
+dest = install_zip(slug, zip_bytes)
 
-if not zip_url:
-    raise SystemExit(f"could not find Petdex zip URL on {page_url}")
-
-zip_url = zip_url.replace("\\/", "/")
-print(f"pi-pet: resolved {slug} -> {zip_url}")
-
-zip_bytes = fetch(zip_url)
-if len(zip_bytes) < 100:
-    raise SystemExit("downloaded zip is unexpectedly small")
-
-pet_root.mkdir(parents=True, exist_ok=True)
-dest = pet_root / slug
-with tempfile.TemporaryDirectory(prefix=f".{slug}-", dir=str(pet_root)) as tmp_name:
-    tmp_dir = Path(tmp_name)
-    zip_path = tmp_dir / "pack.zip"
-    zip_path.write_bytes(zip_bytes)
-
-    with zipfile.ZipFile(zip_path) as zf:
-        names = zf.namelist()
-        if "pet.json" not in names:
-            raise SystemExit("pet pack does not contain pet.json")
-        pet_json = json.loads(zf.read("pet.json").decode("utf-8"))
-        sprite_name = pet_json.get("spritesheetPath") or "spritesheet.webp"
-        if sprite_name not in names:
-            # Some community packs use sprite.webp but still render on Petdex.
-            webp_names = [name for name in names if name.lower().endswith((".webp", ".png"))]
-            if not webp_names:
-                raise SystemExit("pet pack does not contain a spritesheet image")
-            sprite_name = webp_names[0]
-            pet_json["spritesheetPath"] = Path(sprite_name).name
-
-        install_dir = tmp_dir / slug
-        install_dir.mkdir(parents=True, exist_ok=True)
-        source_sprite_name = Path(sprite_name).name
-        source_sprite_path = install_dir / source_sprite_name
-        source_sprite_path.write_bytes(zf.read(sprite_name))
-
-        clean_sprite_name = "spritesheet.clean.png"
-        try:
-            clean_spritesheet_to_png(source_sprite_path, install_dir / clean_sprite_name)
-            pet_json["sourceSpritesheetPath"] = source_sprite_name
-            pet_json["spritesheetPath"] = clean_sprite_name
-            print(f"pi-pet: wrote clean PNG {clean_sprite_name}")
-        except Exception as error:
-            print(f"pi-pet: warning: could not create clean PNG: {error}", file=sys.stderr)
-            pet_json["spritesheetPath"] = source_sprite_name
-
-        (install_dir / "pet.json").write_text(json.dumps(pet_json, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-    if dest.exists():
-        shutil.rmtree(dest)
-    shutil.move(str(tmp_dir / slug), str(dest))
-
-active_path = pet_root / "active"
-active_path.write_text(slug + "\n", encoding="utf-8")
-
-print(f"pi-pet: installed {slug} into {dest}")
-print(f"pi-pet: active pet set to {slug}")
+installed_manifest = json.loads((dest / "pet.json").read_text(encoding="utf-8"))
+installed_sprite = installed_manifest.get("spritesheetPath") or "spritesheet.webp"
+print(f"pi-pet: installed {dest.name} into {dest}")
+print(f"pi-pet: active pet set to {dest.name}")
 print(dest / "pet.json")
-print(dest / (json.loads((dest / "pet.json").read_text(encoding="utf-8")).get("spritesheetPath") or "spritesheet.webp"))
+print(dest / installed_sprite)
 PY

@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +10,9 @@ const instanceId = `pi-${process.pid}`;
 const extensionDir = dirname(fileURLToPath(import.meta.url));
 const packageRoot = dirname(extensionDir);
 const bubbleScript = join(packageRoot, "pet-bubble.sh");
+const petInstallScript = join(packageRoot, "pet-install.sh");
+const petsDir = join(packageRoot, "pets");
+const activePetFile = join(petsDir, "active");
 const usageFile = join(packageRoot, "tmp", "pet-bubbles", instanceId, "usage.json");
 const PROVIDER_ID = "openai-codex";
 const CODEX_AUTH_PATH = join(homedir(), ".codex", "auth.json");
@@ -365,6 +368,186 @@ async function refreshUsage(ctx: ExtensionContext, options?: { refresh?: boolean
   }
 }
 
+type ProcessResult = {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+};
+
+type InstalledPet = {
+  slug: string;
+  displayName: string;
+  active: boolean;
+};
+
+const PET_SLUG_RE = /^[A-Za-z0-9._-]+$/;
+
+function petCommandUsage(): string {
+  return [
+    "Usage:",
+    "  /pet install <petdex-slug-or-url>",
+    "  /pet use <installed-slug>",
+    "  /pet list",
+    "  /pet current",
+    "",
+    "Bare install names use Petdex. Use a codex-pets.net URL for Codex Pets.",
+  ].join("\n");
+}
+
+function assertPetSlug(slug: string): void {
+  if (!PET_SLUG_RE.test(slug) || slug === "." || slug === "..") throw new Error(`Invalid pet slug: ${slug}`);
+}
+
+function lastOutput(result: Pick<ProcessResult, "stdout" | "stderr">): string {
+  const text = `${result.stderr}\n${result.stdout}`.trim();
+  return text.length > 1200 ? text.slice(-1200) : text;
+}
+
+function runProcess(command: string, args: string[], options: { cwd?: string; env?: Record<string, string | undefined>; timeoutMs?: number } = {}): Promise<ProcessResult> {
+  return new Promise((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    const timeout = options.timeoutMs
+      ? setTimeout(() => {
+          timedOut = true;
+          try { child.kill("SIGTERM"); } catch {}
+          setTimeout(() => {
+            try { child.kill("SIGKILL"); } catch {}
+          }, 1500).unref();
+        }, options.timeoutMs)
+      : undefined;
+    timeout?.unref();
+
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      reject(error);
+    });
+
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      resolve({ code, stdout, stderr, timedOut });
+    });
+  });
+}
+
+async function readActivePet(): Promise<string | undefined> {
+  try {
+    const active = (await readFile(activePetFile, "utf8")).trim();
+    return active || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function listInstalledPets(): Promise<InstalledPet[]> {
+  const active = await readActivePet();
+  let entries: Array<{ isDirectory(): boolean; name: string }>;
+  try {
+    entries = await readdir(petsDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const pets: InstalledPet[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !PET_SLUG_RE.test(entry.name)) continue;
+    const manifestPath = join(petsDir, entry.name, "pet.json");
+    if (!existsSync(manifestPath)) continue;
+
+    const manifest = await readJsonObject(manifestPath);
+    const displayName = firstString(manifest, ["displayName", "name", "id"]) ?? entry.name;
+    pets.push({ slug: entry.name, displayName, active: active === entry.name });
+  }
+
+  return pets.sort((a, b) => a.slug.localeCompare(b.slug));
+}
+
+function formatPetList(pets: InstalledPet[]): string {
+  if (pets.length === 0) return "No pets installed.";
+  return pets.map((pet) => `${pet.active ? "*" : " "} ${pet.slug} — ${pet.displayName}`).join("\n");
+}
+
+async function activatePet(slug: string): Promise<string> {
+  assertPetSlug(slug);
+  const manifestPath = join(petsDir, slug, "pet.json");
+  if (!existsSync(manifestPath)) throw new Error(`Pet is not installed: ${slug}`);
+
+  await mkdir(petsDir, { recursive: true });
+  await writeFile(activePetFile, `${slug}\n`, "utf8");
+  return slug;
+}
+
+async function installPet(target: string): Promise<string> {
+  if (!target.trim()) throw new Error("Pet target is required.");
+  if (!existsSync(petInstallScript)) throw new Error(`Missing installer: ${petInstallScript}`);
+
+  const result = await runProcess("bash", [petInstallScript, target.trim()], {
+    cwd: packageRoot,
+    env: { ...process.env, PI_PET_PETS_DIR: petsDir },
+    timeoutMs: 180_000,
+  });
+
+  if (result.timedOut) throw new Error(`Pet install timed out.\n${lastOutput(result)}`.trim());
+  if (result.code !== 0) throw new Error(`Pet install failed.\n${lastOutput(result)}`.trim());
+
+  return (await readActivePet()) ?? target.trim();
+}
+
+function restartPetOverlay(projectCwd: string, activePet: string): void {
+  try {
+    spawnSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*pet-bubble.ps1*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }",
+      ],
+      { stdio: "ignore", timeout: 2500 },
+    );
+  } catch {
+    // Restarting the Windows overlay is cosmetic; the active pet file was already updated.
+  }
+
+  runBubble(projectCwd, ["finished", `Pet: ${activePet}`]);
+}
+
+async function chooseInstalledPet(ctx: ExtensionContext): Promise<string | undefined> {
+  const pets = await listInstalledPets();
+  if (pets.length === 0) {
+    ctx.ui.notify("No pets installed. Try /pet install luffy", "warning");
+    return undefined;
+  }
+
+  const options = pets.map((pet) => `${pet.active ? "✓" : " "} ${pet.slug} — ${pet.displayName}`);
+  const choice = await ctx.ui.select("Choose active pet", options);
+  if (!choice) return undefined;
+  const index = options.indexOf(choice);
+  return index >= 0 ? pets[index].slug : undefined;
+}
+
 export default function (pi: ExtensionAPI) {
   let markedAnswering = false;
 
@@ -406,6 +589,127 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       runBubble(ctx.cwd, parseBubbleArgs(args));
       ctx.ui.notify("pet bubble command sent", "info");
+    },
+  });
+
+  pi.registerCommand("pet", {
+    description: "Install or switch the desktop pet: install <slug-or-url>, use <slug>, list, current",
+    handler: async (args, ctx) => {
+      const trimmed = args.trim();
+      const [command = "", ...rest] = trimmed.split(/\s+/);
+      const value = trimmed.slice(command.length).trim();
+
+      try {
+        if (!trimmed) {
+          const action = await ctx.ui.select("pi-pet", ["Install new pet", "Use installed pet", "List installed pets", "Show current pet"]);
+          if (!action) return;
+
+          if (action === "Install new pet") {
+            const target = await ctx.ui.input("Petdex slug or Codex Pets/Petdex URL", "luffy");
+            if (!target) return;
+            runBubble(ctx.cwd, ["thinking", `Installing pet ${target}...`]);
+            ctx.ui.setStatus("pi-pet", `Installing ${target}...`);
+            try {
+              const activePet = await installPet(target);
+              restartPetOverlay(ctx.cwd, activePet);
+              ctx.ui.notify(`Installed and activated pet: ${activePet}`, "info");
+            } finally {
+              ctx.ui.setStatus("pi-pet", undefined);
+            }
+            return;
+          }
+
+          if (action === "Use installed pet") {
+            const slug = await chooseInstalledPet(ctx);
+            if (!slug) return;
+            const activePet = await activatePet(slug);
+            restartPetOverlay(ctx.cwd, activePet);
+            ctx.ui.notify(`Active pet: ${activePet}`, "info");
+            return;
+          }
+
+          if (action === "List installed pets") {
+            ctx.ui.notify(formatPetList(await listInstalledPets()), "info");
+            return;
+          }
+
+          ctx.ui.notify(`Active pet: ${(await readActivePet()) ?? "none"}`, "info");
+          return;
+        }
+
+        switch (command.toLowerCase()) {
+          case "help":
+          case "-h":
+          case "--help":
+            ctx.ui.notify(petCommandUsage(), "info");
+            return;
+
+          case "list":
+          case "ls":
+            ctx.ui.notify(formatPetList(await listInstalledPets()), "info");
+            return;
+
+          case "current":
+          case "active":
+            ctx.ui.notify(`Active pet: ${(await readActivePet()) ?? "none"}`, "info");
+            return;
+
+          case "use":
+          case "set":
+          case "activate": {
+            const slug = rest[0] ?? (await chooseInstalledPet(ctx));
+            if (!slug) return;
+            const activePet = await activatePet(slug);
+            restartPetOverlay(ctx.cwd, activePet);
+            ctx.ui.notify(`Active pet: ${activePet}`, "info");
+            return;
+          }
+
+          case "install":
+          case "add": {
+            const target = value;
+            if (!target) {
+              ctx.ui.notify("Usage: /pet install <petdex-slug-or-url>", "error");
+              return;
+            }
+
+            runBubble(ctx.cwd, ["thinking", `Installing pet ${target}...`]);
+            ctx.ui.setStatus("pi-pet", `Installing ${target}...`);
+            try {
+              const activePet = await installPet(target);
+              restartPetOverlay(ctx.cwd, activePet);
+              ctx.ui.notify(`Installed and activated pet: ${activePet}`, "info");
+            } finally {
+              ctx.ui.setStatus("pi-pet", undefined);
+            }
+            return;
+          }
+
+          default: {
+            // Convenience: /pet <slug> switches if installed, otherwise installs from Petdex by default.
+            const maybeInstalled = (await listInstalledPets()).some((pet) => pet.slug === command);
+            if (maybeInstalled) {
+              const activePet = await activatePet(command);
+              restartPetOverlay(ctx.cwd, activePet);
+              ctx.ui.notify(`Active pet: ${activePet}`, "info");
+              return;
+            }
+
+            runBubble(ctx.cwd, ["thinking", `Installing pet ${trimmed}...`]);
+            ctx.ui.setStatus("pi-pet", `Installing ${trimmed}...`);
+            try {
+              const activePet = await installPet(trimmed);
+              restartPetOverlay(ctx.cwd, activePet);
+              ctx.ui.notify(`Installed and activated pet: ${activePet}`, "info");
+            } finally {
+              ctx.ui.setStatus("pi-pet", undefined);
+            }
+          }
+        }
+      } catch (error) {
+        ctx.ui.setStatus("pi-pet", undefined);
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
     },
   });
 }
