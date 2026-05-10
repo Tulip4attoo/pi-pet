@@ -110,19 +110,37 @@ def fetch(url: str, accept: str = "text/html,application/xhtml+xml,application/x
         return response.read()
 
 
+def clean_url(value: str) -> str:
+    return html.unescape(value).replace("\\/", "/").replace('\\"', '"')
+
+
 def resolve_petdex_zip_url(target: str, slug: str) -> str:
+    manifest_url = f"{PETDEX_BASE}/api/manifest"
+    try:
+        payload = json.loads(fetch(manifest_url, accept="application/json,*/*").decode("utf-8"))
+        pets = payload.get("pets") if isinstance(payload, dict) else None
+        if isinstance(pets, list):
+            for pet in pets:
+                if not isinstance(pet, dict) or pet.get("slug") != slug:
+                    continue
+                zip_url = pet.get("zipUrl")
+                if isinstance(zip_url, str) and zip_url.strip():
+                    return urllib.parse.urljoin(PETDEX_BASE + "/", clean_url(zip_url.strip()))
+    except Exception as error:
+        print(f"pi-pet: warning: could not read Petdex manifest: {error}", file=sys.stderr)
+
     page_url = target if urllib.parse.urlparse(target).scheme else f"{PETDEX_BASE}/pets/{slug}"
-    page_text = fetch(page_url).decode("utf-8", "ignore")
-    page_text = html.unescape(page_text)
+    page_text = clean_url(fetch(page_url).decode("utf-8", "ignore"))
 
     zip_patterns = [
-        rf'https://[^"\\\s<>)]*/pets/{re.escape(slug)}-[^"\\\s<>)]*/zip\.zip',
-        r'"zipUrl"\s*:\s*"(https://[^"\\]+/zip\.zip)"',
+        rf'https://[^"\\\s<>)]*/pets/{re.escape(slug)}-[^"\\\s<>)]*/zip\.zip(?:\?[^"\\\s<>)]*)?',
+        r'"zipUrl"\s*:\s*"(https://[^"\\]+?\.zip(?:\?[^"\\]*)?)"',
+        rf'https://[^"\\\s<>)]*/(?:curated|pets)/{re.escape(slug)}/[^"\\\s<>)]*\.zip(?:\?[^"\\\s<>)]*)?',
     ]
     for pattern in zip_patterns:
         match = re.search(pattern, page_text, re.IGNORECASE)
         if match:
-            return (match.group(1) if match.lastindex else match.group(0)).replace("\\/", "/")
+            return clean_url(match.group(1) if match.lastindex else match.group(0))
 
     raise SystemExit(f"could not find Petdex zip URL on {page_url}")
 

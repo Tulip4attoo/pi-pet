@@ -17,8 +17,13 @@ const usageFile = join(packageRoot, "tmp", "pet-bubbles", instanceId, "usage.jso
 const PROVIDER_ID = "openai-codex";
 const CODEX_AUTH_PATH = join(homedir(), ".codex", "auth.json");
 const LIVE_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const PETDEX_MANIFEST_URL = "https://petdex.crafter.run/api/manifest";
+const PETDEX_SEARCH_URL = "https://petdex.crafter.run/api/pets/search";
+const CODEX_PETS_BASE = "https://codex-pets.net";
+const CODEX_PETS_SEARCH_URL = `${CODEX_PETS_BASE}/api/pets`;
 const USAGE_CACHE_TTL_MS = 60_000;
 const USAGE_ERROR_CACHE_TTL_MS = 15_000;
+const PETDEX_SEARCH_CACHE_TTL_MS = 10 * 60_000;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -413,6 +418,27 @@ type InstalledPet = {
   active: boolean;
 };
 
+type PetdexPet = {
+  slug: string;
+  displayName?: string;
+  kind?: string;
+  description?: string;
+  vibes?: string[];
+  colors?: string[];
+  submittedBy?: string;
+  zipUrl?: string;
+  source?: "Petdex" | "Codex Pets";
+  installTarget?: string;
+};
+
+type PetdexSearchCache = {
+  expiresAt: number;
+  pets?: PetdexPet[];
+  promise?: Promise<PetdexPet[]>;
+};
+
+let petdexSearchCache: PetdexSearchCache = { expiresAt: 0 };
+
 type CompletionItem = {
   value: string;
   label: string;
@@ -422,7 +448,7 @@ type CompletionItem = {
 const PET_SLUG_RE = /^[A-Za-z0-9._-]+$/;
 
 const PET_GUIDE = [
-  "Pi-pet agent guide: install and switch desktop pets",
+  "Pi-pet agent guide: search, install, and switch desktop pets",
   "",
   "For agent-driven pet changes, use the pi_pet tool. Do not write /pet commands in bash or in assistant text expecting them to auto-run.",
   "The /pet slash command namespace is for the user/editor; the pi_pet tool is for the model. Pet sources are Petdex and Codex Pets.",
@@ -432,19 +458,29 @@ const PET_GUIDE = [
   "  Lists installed pets first. If the requested pet is already installed, prefer action: use.",
   "- action: use, target: <installed-slug>",
   "  Switches to an already installed pet.",
-  "- action: install, target: <petdex-slug-or-url>",
+  "- action: search, target: <query>",
+  "  Searches both Petdex and Codex Pets by name, character, vibe, tags, or description. Results include source and an install target/URL.",
+  "- action: install, target: <petdex-slug-or-codex-pets-url>",
   "  Installs a pet and makes it active. Bare names/slugs use Petdex by default, e.g. luffy.",
-  "  Use a codex-pets.net URL for Codex Pets, e.g. https://codex-pets.net/#/pets/dario.",
+  "  For Codex Pets, pass the codex-pets.net URL returned by search, e.g. https://codex-pets.net/#/pets/dario.",
   "- action: current",
   "  Shows the active pet.",
   "",
+  "Examples:",
+  "- User: switch to boba → first list; if boba is installed use {action: 'use', target: 'boba'}, otherwise install {action: 'install', target: 'boba'}.",
+  "- User: find a goku pet → {action: 'search', target: 'goku'}, then install the best exact result or ask if several variants look plausible.",
+  "- Petdex result install line says '/pet install goku-blue' → use {action: 'install', target: 'goku-blue'}.",
+  "- Codex Pets result install line says '/pet install https://codex-pets.net/#/pets/son-goku' → use {action: 'install', target: 'https://codex-pets.net/#/pets/son-goku'}.",
+  "- User: cozy dragon / cute cat / fierce robot → search those exact words before choosing a pet.",
+  "",
   "Natural-language workflow:",
-  "1. When the user asks to change pets, check the installed pet list first if it is not already available in the current conversation. Do not call list repeatedly when a fresh list is already present.",
-  "2. If an installed slug matches the request, call pi_pet with action: use and that slug; do not reinstall it.",
-  "3. If it is not installed, find or infer a valid Petdex slug or Codex Pets URL. Install only when reasonably confident.",
-  "4. If multiple plausible candidates exist, ask the user to choose before installing.",
-  "5. If install fails with not found/404, do not keep retrying the same slug. Search Petdex and Codex Pets for close names/aliases, try a better candidate if confident, otherwise explain the miss and ask the user for a slug or URL.",
-  "6. If web/search is unavailable, avoid guessing obscure names; ask the user for the exact Petdex slug or Codex Pets URL.",
+  "1. When the user asks to change pets, check the installed pet list first if it is not already fresh in the conversation. Do not call list repeatedly when a recent list is available.",
+  "2. If an installed slug clearly matches the request, call pi_pet with action: use and that slug; do not reinstall it.",
+  "3. If the request is descriptive, vague, or a popular character/name that may have multiple variants (e.g. goku, dragon, cozy cat), call pi_pet with action: search and the user's words before installing.",
+  "4. Read search results carefully. Prefer exact name/character matches and respect the source: Petdex results can be installed by slug; Codex Pets results should be installed with the returned codex-pets.net URL.",
+  "5. If there is one strong match, install it using pi_pet action: install with the exact target from the result. If multiple plausible variants exist, briefly present the options and ask the user to choose.",
+  "6. If install fails with not found/404, do not keep retrying the same target. Search for close names/aliases, try a better candidate only if confident, otherwise explain the miss and ask for a slug or URL.",
+  "7. If search is unavailable, avoid guessing obscure names; ask the user for the exact Petdex slug or Codex Pets URL.",
 ].join("\n");
 
 const PetToolParams = {
@@ -452,12 +488,12 @@ const PetToolParams = {
   properties: {
     action: {
       type: "string",
-      enum: ["list", "current", "use", "install"],
-      description: "Pet action to perform. Use list before deciding whether to use or install.",
+      enum: ["list", "current", "use", "install", "search"],
+      description: "Pet action to perform. Examples: list, search with target 'goku', install with target 'boba' or 'https://codex-pets.net/#/pets/son-goku', use with target 'boba'.",
     },
     target: {
       type: "string",
-      description: "Installed slug for use, or Petdex slug/Codex Pets URL for install.",
+      description: "Installed slug for use; Petdex slug or Codex Pets URL for install; query text for search. Examples: 'boba', 'goku', 'cozy dragon', 'https://codex-pets.net/#/pets/son-goku'.",
     },
   },
   required: ["action"],
@@ -468,6 +504,7 @@ function petCommandUsage(): string {
   return [
     "Usage:",
     "  /pet install <petdex-slug-or-url>",
+    "  /pet search <query>",
     "  /pet use <installed-slug>",
     "  /pet list",
     "  /pet current",
@@ -583,6 +620,195 @@ function formatPetList(pets: InstalledPet[]): string {
   return pets.map((pet) => `${pet.active ? "*" : " "} ${pet.slug} — ${pet.displayName}`).join("\n");
 }
 
+function petdexPetSearchText(pet: PetdexPet): string {
+  return [pet.slug, pet.displayName, pet.kind, pet.description, pet.vibes?.join(" "), pet.colors?.join(" "), pet.submittedBy].filter(Boolean).join(" ").toLowerCase();
+}
+
+function parseStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items = value.filter((item): item is string => typeof item === "string" && item.trim()).map((item) => item.trim());
+  return items.length > 0 ? items : undefined;
+}
+
+function parsePetdexPet(raw: unknown): PetdexPet[] {
+  if (!isRecord(raw) || typeof raw.slug !== "string" || !raw.slug.trim()) return [];
+  let submittedBy: string | undefined;
+  if (typeof raw.submittedBy === "string") submittedBy = raw.submittedBy.trim();
+  else if (isRecord(raw.submittedBy) && typeof raw.submittedBy.name === "string") submittedBy = raw.submittedBy.name.trim();
+
+  const slug = raw.slug.trim();
+  return [{
+    slug,
+    displayName: typeof raw.displayName === "string" ? raw.displayName.trim() : undefined,
+    kind: typeof raw.kind === "string" ? raw.kind.trim() : undefined,
+    description: typeof raw.description === "string" ? raw.description.trim() : undefined,
+    vibes: parseStringArray(raw.vibes),
+    colors: parseStringArray(raw.colors),
+    submittedBy,
+    zipUrl: typeof raw.zipUrl === "string" ? raw.zipUrl.trim() : undefined,
+    source: "Petdex",
+    installTarget: slug,
+  }];
+}
+
+function parseCodexPet(raw: unknown): PetdexPet[] {
+  if (!isRecord(raw) || typeof raw.id !== "string" || !raw.id.trim()) return [];
+  const slug = raw.id.trim();
+  return [{
+    slug,
+    displayName: typeof raw.displayName === "string" ? raw.displayName.trim() : typeof raw.name === "string" ? raw.name.trim() : undefined,
+    kind: typeof raw.kind === "string" ? raw.kind.trim() : undefined,
+    description: typeof raw.description === "string" ? raw.description.trim() : undefined,
+    vibes: parseStringArray(raw.tags),
+    submittedBy: typeof raw.ownerName === "string" ? raw.ownerName.trim() : undefined,
+    zipUrl: typeof raw.downloadUrl === "string" ? new URL(raw.downloadUrl, CODEX_PETS_BASE).toString() : undefined,
+    source: "Codex Pets",
+    installTarget: `${CODEX_PETS_BASE}/#/pets/${encodeURIComponent(slug)}`,
+  }];
+}
+
+function getFetch(): (url: string, init?: Record<string, unknown>) => Promise<any> {
+  const fetchFn = (globalThis as any).fetch as undefined | ((url: string, init?: Record<string, unknown>) => Promise<any>);
+  if (!fetchFn) throw new Error("fetch is not available in this pi runtime");
+  return fetchFn;
+}
+
+async function fetchPetdexPets(): Promise<PetdexPet[]> {
+  const now = Date.now();
+  if (petdexSearchCache.pets && petdexSearchCache.expiresAt > now) return petdexSearchCache.pets;
+  if (petdexSearchCache.promise && petdexSearchCache.expiresAt > now) return petdexSearchCache.promise;
+
+  const fetchFn = getFetch();
+
+  const promise = (async () => {
+    const response = await fetchFn(PETDEX_MANIFEST_URL, {
+      headers: {
+        "Accept": "application/json,*/*",
+        "User-Agent": "pi-pet search",
+      },
+    });
+    if (!response.ok) throw new Error(`Petdex manifest request failed: HTTP ${response.status}`);
+
+    const payload = await response.json();
+    const rawPets = isRecord(payload) && Array.isArray(payload.pets) ? payload.pets : [];
+    const pets = rawPets.flatMap(parsePetdexPet);
+    petdexSearchCache = { pets, expiresAt: Date.now() + PETDEX_SEARCH_CACHE_TTL_MS };
+    return pets;
+  })();
+
+  petdexSearchCache = { promise, expiresAt: now + PETDEX_SEARCH_CACHE_TTL_MS };
+  return promise;
+}
+
+async function searchPetdexPetsViaApi(query: string, limit: number): Promise<PetdexPet[]> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  const response = await getFetch()(`${PETDEX_SEARCH_URL}?${params}`, {
+    headers: {
+      "Accept": "application/json,*/*",
+      "Referer": "https://petdex.crafter.run/",
+      "User-Agent": "pi-pet search",
+    },
+  });
+  if (!response.ok) throw new Error(`Petdex search request failed: HTTP ${response.status}`);
+
+  const payload = await response.json();
+  const rawPets = isRecord(payload) && Array.isArray(payload.pets) ? payload.pets : [];
+  return rawPets.flatMap(parsePetdexPet);
+}
+
+async function searchPetdexPetsFromManifest(query: string, limit: number): Promise<PetdexPet[]> {
+  const terms = query.toLowerCase().split(/\s+/).map((term) => term.trim()).filter(Boolean);
+  if (terms.length === 0) throw new Error("Search query is required.");
+
+  const scored = (await fetchPetdexPets()).flatMap((pet, index): Array<{ pet: PetdexPet; score: number; index: number }> => {
+    const slug = pet.slug.toLowerCase();
+    const name = (pet.displayName ?? "").toLowerCase();
+    const text = petdexPetSearchText(pet);
+    if (!terms.every((term) => text.includes(term))) return [];
+
+    let score = 0;
+    const joined = terms.join(" ");
+    if (slug === joined) score += 100;
+    if (name === joined) score += 90;
+    for (const term of terms) {
+      if (slug === term) score += 50;
+      else if (slug.startsWith(term)) score += 30;
+      else if (slug.includes(term)) score += 15;
+
+      if (name === term) score += 45;
+      else if (name.startsWith(term)) score += 25;
+      else if (name.includes(term)) score += 12;
+
+      if ((pet.kind ?? "").toLowerCase().includes(term)) score += 5;
+      if ((pet.submittedBy ?? "").toLowerCase().includes(term)) score += 2;
+    }
+    return [{ pet, score, index }];
+  });
+
+  return scored
+    .sort((a, b) => b.score - a.score || a.index - b.index || a.pet.slug.localeCompare(b.pet.slug))
+    .slice(0, limit)
+    .map((entry) => entry.pet);
+}
+
+async function searchPetdexPets(query: string, limit = 8): Promise<PetdexPet[]> {
+  if (!query.trim()) throw new Error("Search query is required.");
+  try {
+    return await searchPetdexPetsViaApi(query.trim(), limit);
+  } catch {
+    return searchPetdexPetsFromManifest(query, limit);
+  }
+}
+
+async function searchCodexPets(query: string, limit = 8): Promise<PetdexPet[]> {
+  if (!query.trim()) throw new Error("Search query is required.");
+  const params = new URLSearchParams({ q: query.trim(), page: "1", pageSize: String(limit) });
+  const response = await getFetch()(`${CODEX_PETS_SEARCH_URL}?${params}`, {
+    headers: {
+      "Accept": "application/json,*/*",
+      "Referer": `${CODEX_PETS_BASE}/`,
+      "User-Agent": "pi-pet search",
+    },
+  });
+  if (!response.ok) throw new Error(`Codex Pets search request failed: HTTP ${response.status}`);
+
+  const payload = await response.json();
+  const rawPets = isRecord(payload) && Array.isArray(payload.pets) ? payload.pets : [];
+  return rawPets.flatMap(parseCodexPet);
+}
+
+async function searchPets(query: string): Promise<PetdexPet[]> {
+  const [petdex, codex] = await Promise.allSettled([
+    searchPetdexPets(query),
+    searchCodexPets(query),
+  ]);
+
+  const results = [
+    ...(petdex.status === "fulfilled" ? petdex.value : []),
+    ...(codex.status === "fulfilled" ? codex.value : []),
+  ];
+  if (results.length === 0 && petdex.status === "rejected" && codex.status === "rejected") {
+    throw new Error(`Pet search failed. Petdex: ${petdex.reason}; Codex Pets: ${codex.reason}`);
+  }
+  return results;
+}
+
+function formatPetSearchResults(query: string, pets: PetdexPet[]): string {
+  if (pets.length === 0) return `No Petdex/Codex Pets found for: ${query}`;
+  return [
+    `Pet search results for: ${query}`,
+    ...pets.map((pet) => {
+      const source = pet.source ?? "Petdex";
+      const tags = pet.vibes?.length ? `#${pet.vibes.join(" #")}` : undefined;
+      const details = [pet.displayName && pet.displayName !== pet.slug ? pet.displayName : undefined, pet.kind, tags, pet.submittedBy ? `by ${pet.submittedBy}` : undefined]
+        .filter(Boolean)
+        .join(" · ");
+      const description = pet.description ? ` — ${pet.description}` : "";
+      return `- [${source}] ${pet.slug}${details ? ` — ${details}` : ""}${description}\n  install: /pet install ${pet.installTarget ?? pet.slug}`;
+    }),
+  ].join("\n");
+}
+
 async function getPetCompletions(prefix: string): Promise<CompletionItem[] | null> {
   const installedPets = await listInstalledPets();
   const installedPetCompletions = installedPets.flatMap((pet): CompletionItem[] => {
@@ -601,6 +827,8 @@ async function getPetCompletions(prefix: string): Promise<CompletionItem[] | nul
       { value: "install luffy", label: "install luffy", description: "Example Petdex install" },
       { value: "install https://codex-pets.net/#/pets/dario", label: "install Codex Pets URL", description: "Example Codex Pets install" },
       { value: "add ", label: "add", description: "Alias for install" },
+      { value: "search ", label: "search", description: "Search Petdex and Codex Pets by text/vibe/name" },
+      { value: "find ", label: "find", description: "Alias for search" },
       { value: "use ", label: "use", description: "Activate an installed pet" },
       { value: "set ", label: "set", description: "Alias for use" },
       { value: "activate ", label: "activate", description: "Alias for use" },
@@ -650,7 +878,7 @@ function requirePetTarget(target: string | undefined, action: string): string {
   return trimmed;
 }
 
-async function runPetToolAction(action: "list" | "current" | "use" | "install", target: string | undefined, ctx: ExtensionContext) {
+async function runPetToolAction(action: "list" | "current" | "use" | "install" | "search", target: string | undefined, ctx: ExtensionContext) {
   switch (action) {
     case "list": {
       const pets = await listInstalledPets();
@@ -686,6 +914,15 @@ async function runPetToolAction(action: "list" | "current" | "use" | "install", 
       return {
         content: [{ type: "text" as const, text: `Installed and activated pet: ${activePet}` }],
         details: { action, target: installTarget, activePet },
+      };
+    }
+
+    case "search": {
+      const query = requirePetTarget(target, action);
+      const results = await searchPets(query);
+      return {
+        content: [{ type: "text" as const, text: formatPetSearchResults(query, results) }],
+        details: { action, query, results },
       };
     }
   }
@@ -777,11 +1014,13 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "pi_pet",
     label: "Pi Pet",
-    description: "Manage the desktop pet: list installed pets, show current pet, switch to an installed pet, or install a Petdex/Codex Pets pet.",
-    promptSnippet: "Manage the desktop pet with list/current/use/install actions.",
+    description: "Manage the desktop pet: search Petdex/Codex Pets, list installed pets, show current pet, switch pets, or install a Petdex/Codex Pets pet.",
+    promptSnippet: "Manage the desktop pet with list/current/use/install/search actions.",
     promptGuidelines: [
       "Use pi_pet for agent-driven desktop pet changes instead of writing /pet slash commands or running /pet in bash.",
       "Use pi_pet with action list before installing; if the requested pet is already installed, use action use instead of reinstalling.",
+      "Use pi_pet with action search for vague/descriptive requests or names with multiple variants; install the exact target returned by search, especially codex-pets.net URLs for Codex Pets results.",
+      "Examples: search Goku -> { action: 'search', target: 'goku' }; install Petdex Boba -> { action: 'install', target: 'boba' }; install Codex Son Goku -> { action: 'install', target: 'https://codex-pets.net/#/pets/son-goku' }; switch installed Boba -> { action: 'use', target: 'boba' }.",
     ],
     parameters: PetToolParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -790,7 +1029,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("pet", {
-    description: "Install or switch the desktop pet: install <slug-or-url>, use <slug>, list, current, agent guide",
+    description: "Install, search, or switch the desktop pet: install <slug-or-url>, search <query>, use <slug>, list, current, agent guide",
     getArgumentCompletions: getPetCompletions,
     handler: async (args, ctx) => {
       const trimmed = args.trim();
@@ -799,7 +1038,7 @@ export default function (pi: ExtensionAPI) {
 
       try {
         if (!trimmed) {
-          const action = await ctx.ui.select("pi-pet", ["Install new pet", "Use installed pet", "List installed pets", "Show current pet"]);
+          const action = await ctx.ui.select("pi-pet", ["Install new pet", "Search pets", "Use installed pet", "List installed pets", "Show current pet"]);
           if (!action) return;
 
           if (action === "Install new pet") {
@@ -811,6 +1050,18 @@ export default function (pi: ExtensionAPI) {
               const activePet = await installPet(target);
               restartPetOverlay(ctx.cwd, activePet);
               ctx.ui.notify(`Installed and activated pet: ${activePet}`, "info");
+            } finally {
+              ctx.ui.setStatus("pi-pet", undefined);
+            }
+            return;
+          }
+
+          if (action === "Search pets") {
+            const query = await ctx.ui.input("Pet search query", "cozy dragon");
+            if (!query) return;
+            ctx.ui.setStatus("pi-pet", `Searching ${query}...`);
+            try {
+              ctx.ui.notify(formatPetSearchResults(query, await searchPets(query)), "info");
             } finally {
               ctx.ui.setStatus("pi-pet", undefined);
             }
@@ -851,6 +1102,22 @@ export default function (pi: ExtensionAPI) {
           case "active":
             ctx.ui.notify(`Active pet: ${(await readActivePet()) ?? "none"}`, "info");
             return;
+
+          case "search":
+          case "find": {
+            const query = value;
+            if (!query) {
+              ctx.ui.notify("Usage: /pet search <query>", "error");
+              return;
+            }
+            ctx.ui.setStatus("pi-pet", `Searching ${query}...`);
+            try {
+              ctx.ui.notify(formatPetSearchResults(query, await searchPets(query)), "info");
+            } finally {
+              ctx.ui.setStatus("pi-pet", undefined);
+            }
+            return;
+          }
 
           case "guide":
             loadPetGuide(pi, ctx);

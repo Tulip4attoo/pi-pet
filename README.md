@@ -96,13 +96,14 @@ Manage pets from inside pi:
 ```text
 /pet install luffy
 /pet install https://codex-pets.net/#/pets/dario
+/pet search cozy dragon
 /pet use einstein
 /pet list
 /pet current
 /pet agent guide
 ```
 
-Bare `/pet install <name>` uses Petdex by default. A `codex-pets.net` URL installs from Codex Pets. `/pet agent guide` adds short guidance for agent-driven pet changes using the `pi_pet` tool.
+Bare `/pet install <name>` uses Petdex by default. A `codex-pets.net` URL installs from Codex Pets. `/pet search <query>` searches both Petdex and Codex Pets and returns installable slugs/URLs. `/pet agent guide` adds short guidance for agent-driven pet changes using the `pi_pet` tool.
 
 ## Multi-instance behavior
 
