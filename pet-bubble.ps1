@@ -309,8 +309,8 @@ function Test-SourceWithinPetView($Source) {
     return $false
 }
 
-function Activate-DefaultBubbleTarget {
-    if ($items.Count -eq 0) { return }
+function Get-DefaultBubbleItem {
+    if ($items.Count -eq 0) { return $null }
 
     $target = $null
     foreach ($item in $items.Values) {
@@ -319,7 +319,17 @@ function Activate-DefaultBubbleTarget {
         }
     }
 
+    return $target
+}
+
+function Activate-DefaultBubbleTarget {
+    $target = Get-DefaultBubbleItem
     if ($null -ne $target) { Activate-BubbleTarget ([string]$target.Id) }
+}
+
+function Remove-DefaultBubbleTarget {
+    $target = Get-DefaultBubbleItem
+    if ($null -ne $target) { Remove-BubbleItem ([string]$target.Id) -RemoveDirectory }
 }
 
 function Test-WslPidActive($Command) {
@@ -549,8 +559,18 @@ function Start-PetTransient([string]$State, [string]$ReturnState) {
     Start-PetAnimation $State -Transient -ReturnState $return
 }
 
+function Set-PetFrameSource([int]$Row, [int]$Frame) {
+    if ($null -eq $script:petImage -or $null -eq $script:petSpritesheet) { return }
+
+    $rect = New-Object Windows.Int32Rect ($Frame * 192), ($Row * 208), 192, 208
+    $crop = New-Object Windows.Media.Imaging.CroppedBitmap -ArgumentList $script:petSpritesheet, $rect
+    $crop.Freeze()
+    $script:petImage.Source = $crop
+}
+
 function Update-PetFrame([switch]$Force) {
     if ($null -eq $script:petImage -or $null -eq $script:petSpritesheet) { return }
+    if ($script:isDragging -and -not [string]::IsNullOrWhiteSpace([string]$script:dragPetState)) { return }
 
     $now = [DateTime]::UtcNow
     if (-not $Force -and $now -lt $script:nextPetFrameUtc) { return }
@@ -572,10 +592,7 @@ function Update-PetFrame([switch]$Force) {
 
         $frame = [int]$script:petFrameIndex
         $row = [int]$spec.Row
-        $rect = New-Object Windows.Int32Rect ($frame * 192), ($row * 208), 192, 208
-        $crop = New-Object Windows.Media.Imaging.CroppedBitmap -ArgumentList $script:petSpritesheet, $rect
-        $crop.Freeze()
-        $script:petImage.Source = $crop
+        Set-PetFrameSource $row $frame
 
         $durations = @($spec.Durations)
         $delay = if ($durations.Count -gt $frame) { [int]$durations[$frame] } else { 140 }
@@ -583,6 +600,54 @@ function Update-PetFrame([switch]$Force) {
         $script:nextPetFrameUtc = $now.AddMilliseconds($delay)
     }
     catch {}
+}
+
+function Update-DragPetFrame([switch]$Force) {
+    if (-not $script:isDragging) { return }
+    if ($null -eq $script:petImage -or $null -eq $script:petSpritesheet) { return }
+    if ([string]::IsNullOrWhiteSpace([string]$script:dragPetState)) { return }
+
+    $now = [DateTime]::UtcNow
+    if (-not $Force -and $now -lt $script:dragNextPetFrameUtc) { return }
+
+    try {
+        $spec = Get-PetAnimationSpec $script:dragPetState
+        $frameCount = [int]$spec.Frames
+        if ($frameCount -le 0) { return }
+
+        if ($script:dragPetFrameIndex -ge $frameCount) { $script:dragPetFrameIndex = 0 }
+
+        $frame = [int]$script:dragPetFrameIndex
+        $row = [int]$spec.Row
+        Set-PetFrameSource $row $frame
+
+        $durations = @($spec.Durations)
+        $delay = if ($durations.Count -gt $frame) { [int]$durations[$frame] } else { 90 }
+        $script:dragPetFrameIndex = $frame + 1
+        $script:dragNextPetFrameUtc = $now.AddMilliseconds($delay)
+    }
+    catch {}
+}
+
+function Start-DragPetAnimation([string]$State) {
+    $normalized = Normalize-PetState $State
+    if ($normalized -ne "running-left" -and $normalized -ne "running-right") { return }
+
+    if ($script:dragPetState -ne $normalized) {
+        $script:dragPetState = $normalized
+        $script:dragPetFrameIndex = 0
+        $script:dragNextPetFrameUtc = [DateTime]::MinValue
+        Update-DragPetFrame -Force
+        return
+    }
+
+    Update-DragPetFrame
+}
+
+function Stop-DragPetAnimation {
+    $script:dragPetState = ""
+    $script:dragPetFrameIndex = 0
+    $script:dragNextPetFrameUtc = [DateTime]::MinValue
 }
 
 function Get-CommandPetBaseState($Command) {
@@ -840,6 +905,22 @@ function New-UsagePath([double]$Thickness) {
     return $path
 }
 
+function New-PetContextMenu {
+    $menu = New-Object Windows.Controls.ContextMenu
+
+    $showItem = New-Object Windows.Controls.MenuItem
+    $showItem.Header = "Show window"
+    $showItem.Add_Click({ Activate-DefaultBubbleTarget })
+
+    $closeItem = New-Object Windows.Controls.MenuItem
+    $closeItem.Header = "Close pet"
+    $closeItem.Add_Click({ Remove-DefaultBubbleTarget })
+
+    $menu.Items.Add($showItem) | Out-Null
+    $menu.Items.Add($closeItem) | Out-Null
+    return $menu
+}
+
 function New-PetView {
     $script:petSpritesheet = Load-PetSpritesheet
     if ($null -eq $script:petSpritesheet) { return $null }
@@ -873,6 +954,7 @@ function New-PetView {
     $root.VerticalAlignment = [Windows.VerticalAlignment]::Bottom
     $root.Background = [Windows.Media.Brushes]::Transparent
     $root.IsHitTestVisible = $true
+    $root.ContextMenu = New-PetContextMenu
     $script:petViewRoot = $root
 
     $ringCanvas = New-Object Windows.Controls.Canvas
@@ -1178,6 +1260,9 @@ $script:dragStartCursor = $null
 $script:dragStartLeft = 0.0
 $script:dragStartTop = 0.0
 $script:dragLastDirection = ""
+$script:dragPetState = ""
+$script:dragPetFrameIndex = 0
+$script:dragNextPetFrameUtc = [DateTime]::MinValue
 
 $window = New-Object Windows.Window
 $window.WindowStyle = [Windows.WindowStyle]::None
@@ -1249,6 +1334,7 @@ $window.Add_MouseLeftButtonDown({
         $script:dragStartLeft = [double]$window.Left
         $script:dragStartTop = [double]$window.Top
         $script:dragLastDirection = ""
+        Stop-DragPetAnimation
         try { [void]$window.CaptureMouse() } catch {}
     }
 })
@@ -1272,8 +1358,11 @@ $window.Add_MouseMove({
         $direction = if ($dx -gt 0) { "running-right" } else { "running-left" }
         if ($script:dragLastDirection -ne $direction) {
             $script:dragLastDirection = $direction
-            Start-PetAnimation $direction
         }
+        Start-DragPetAnimation $direction
+    }
+    else {
+        Update-DragPetFrame
     }
 })
 
@@ -1290,6 +1379,7 @@ $window.Add_MouseLeftButtonUp({
     $script:dragPetClick = $false
     $script:dragStartCursor = $null
     $script:dragLastDirection = ""
+    Stop-DragPetAnimation
     try { $window.ReleaseMouseCapture() } catch {}
 
     if ($moved) {
