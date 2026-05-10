@@ -1,15 +1,20 @@
-# Pi Windows Bubble Overlay
+# Pi Pet
 
-Small WSL -> Windows overlay helper for [pi](https://pi.dev): show a draggable 2-line status bubble on Windows while pi runs in WSL.
+A Codex-inspired desktop pet and status bubble for [pi](https://pi.dev) on Windows/WSL. It shows working status and Codex subscription usage, so you do not miss when a session is done.
 
-It displays one row per pi instance:
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Tulip4attoo/media_for_projects/master/pi-pet-0.3.gif" width="720" alt="Pi Pet demo" />
+</p>
 
-```text
-/home/tulip/project
-Thinking...
-```
+## Features
 
-Multiple pi instances are stacked in one Windows overlay window. Click a row to bring its terminal window back to the front; right-click a row for Show window / Close pet; drag any row to move the whole stack.
+- Animated desktop pet for pi sessions
+- Ready / Working / Finished status bubble
+- Codex subscription usage rings when using a Codex model
+- [Petdex](https://petdex.crafter.run/) and [Codex Pets](https://codex-pets.net/) support - you could use pet from both.
+- Multiple pi sessions in one overlay
+- Click to focus the terminal, drag to move, right-click for actions
+- Ask pi in chat to install or switch to the pet you want
 
 ## Requirements
 
@@ -17,41 +22,10 @@ Multiple pi instances are stacked in one Windows overlay window. Click a row to 
 - Windows PowerShell available as `powershell.exe`
 - pi installed in WSL
 
-## Files
-
-```text
-package.json                   pi package manifest
-extensions/pet-bubble.ts       pi extension hooking session events
-pet-bubble.ps1                 Windows WPF overlay manager
-pet-bubble.sh                  WSL wrapper/command writer
-pet-install.sh                 Petdex/Codex Pets pet pack installer
-pets/default/                  bundled default Einstein pet
-show-overlay.ps1               standalone image overlay helper
-show-overlay.sh                WSL wrapper for image overlay
-```
-
-## Install/use with pi
-
-Install as a pi package from git:
+## Install
 
 ```bash
-pi install git:github.com/<you>/pi-pet-bubble
-# or
-pi install https://github.com/<you>/pi-pet-bubble
-```
-
-For a project-local install, run from the target project:
-
-```bash
-pi install -l git:github.com/<you>/pi-pet-bubble
-```
-
-For local development from this checkout:
-
-```bash
-pi install ./
-# or temporary for one run:
-pi -e ./
+pi install https://github.com/Tulip4attoo/pi-pet
 ```
 
 If pi is already open, reload extensions:
@@ -60,111 +34,62 @@ If pi is already open, reload extensions:
 /reload
 ```
 
-After that, the bubble updates automatically:
+After that, Pi Pet starts automatically with pi.
+
+## Usage
+
+Pi Pet follows pi session events automatically. You can manage pets with:
 
 ```text
-session_start  -> Ready
-agent_start    -> Working...
-agent_end      -> Finished
-quit/exit      -> remove this row
+/pet search goku
+/pet install luffy
+/pet install https://codex-pets.net/#/pets/dario
+/pet list
+/pet use luffy
+/pet current
 ```
 
-It also has a watchdog. If pi is suspended with `Ctrl+Z` or the process dies, the row is removed automatically after about 1 second.
+## Updates and pet storage
 
-## Manual bubble commands
-
-From WSL:
+Update package code with:
 
 ```bash
-./pet-bubble.sh start
-./pet-bubble.sh thinking "Working..."
-./pet-bubble.sh finished "Done"
+pi update
+```
+
+User-installed pets are stored outside the package checkout:
+
+```text
+${XDG_DATA_HOME:-$HOME/.local/share}/pi-pet/pets
+```
+
+So `pi update` can reset the package without deleting installed pets. The bundled fallback pet remains in `pets/default/`.
+
+## Local development
+
+Run from this checkout:
+
+```bash
+pi install ./
+# or temporary for one run:
+pi -e ./
+```
+
+Manual overlay test:
+
+```bash
+./pet-bubble.sh thinking "test pet"
 ./pet-bubble.sh stop
 ```
 
-Inside pi:
+File map:
 
 ```text
-/bubble start
-/bubble thinking đang làm...
-/bubble finished xong rồi
-/bubble stop
+package.json                   pi package manifest
+extensions/pet-bubble.ts       pi extension, /pet commands, pi_pet tool
+pet-bubble.sh                  WSL command writer
+pet-bubble.ps1                 Windows WPF overlay manager
+pet-install.sh                 Petdex/Codex Pets installer
+pets/default/                  bundled fallback pet
+show-overlay.sh/.ps1           standalone image overlay helper
 ```
-
-Manage pets from inside pi:
-
-```text
-/pet install luffy
-/pet install https://codex-pets.net/#/pets/dario
-/pet search cozy dragon
-/pet use einstein
-/pet list
-/pet current
-/pet agent guide
-```
-
-Bare `/pet install <name>` uses Petdex by default. A `codex-pets.net` URL installs from Codex Pets. `/pet search <query>` searches both Petdex and Codex Pets and returns installable slugs/URLs. `/pet agent guide` adds short guidance for agent-driven pet changes using the `pi_pet` tool.
-
-## Multi-instance behavior
-
-Each pi process gets a unique row based on its PID. Rows are rendered by one Windows overlay manager and stacked vertically. Clicking a row focuses the terminal window that was active when that row first wrote a bubble command.
-
-Manual test:
-
-```bash
-PI_PET_BUBBLE_ID=a PI_PET_BUBBLE_DIR=/project/a ./pet-bubble.sh thinking "Thinking A"
-PI_PET_BUBBLE_ID=b PI_PET_BUBBLE_DIR=/project/b ./pet-bubble.sh answering "Answering B"
-```
-
-## Install pets
-
-Install a pet pack into the persistent user pet store and make it active:
-
-```bash
-./pet-install.sh luffy
-./pet-install.sh https://petdex.crafter.run/pets/luffy
-./pet-install.sh https://codex-pets.net/#/pets/dario
-```
-
-Bare names/slugs use Petdex by default. To install from Codex Pets, pass a `codex-pets.net` pet URL.
-
-User-installed pets are stored outside the package checkout so they survive `pi update`:
-
-```text
-${XDG_DATA_HOME:-$HOME/.local/share}/pi-pet/pets/<slug>/
-${XDG_DATA_HOME:-$HOME/.local/share}/pi-pet/pets/active
-```
-
-The bundled `pets/default/` remains as a read-only fallback. If older installs are found under the package `pets/` directory, pi-pet copies them into the persistent store on startup.
-
-## Image overlay helper
-
-Standalone image overlay:
-
-```bash
-./show-overlay.sh ./image.png -Nearest
-```
-
-Useful options:
-
-```bash
--ClickThrough
--Duration 10
--Opacity 0.9
--AlphaThreshold 4
--TransparentColor '#ff00ff' -ColorTolerance 80
-```
-
-## Packaging notes
-
-This repo is structured as a pi package. `package.json` declares:
-
-```json
-{
-  "pi": {
-    "extensions": ["./extensions/pet-bubble.ts"]
-  }
-}
-```
-
-Runtime files under `tmp/` are ignored.
