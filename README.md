@@ -14,7 +14,7 @@ A Codex-inspired desktop pet and status bubble for [pi](https://pi.dev) on Windo
 - [Petdex](https://petdex.crafter.run/) and [Codex Pets](https://codex-pets.net/) support - you could use pet from both.
 - Multiple pi sessions in one overlay
 - Click to focus the terminal, drag to move, right-click for actions
-- Ask pi in chat to install or switch to the pet you want
+- Opt in with `/pet agent guide` to let pi install or switch pets from chat
 
 ## Requirements
 
@@ -48,6 +48,18 @@ Pi Pet follows pi session events automatically. You can manage pets with:
 /pet use luffy
 /pet current
 ```
+
+## LLM pet tool is opt-in
+
+By default, Pi Pet only starts the overlay and `/pet` slash command. It does not register the `pi_pet` LLM tool, so no pet tool metadata/guidance is added to the model context.
+
+When you want the model to manage pets, run:
+
+```text
+/pet agent guide
+```
+
+That registers/enables the `pi_pet` tool for the session and adds the pet-management guide to the conversation. To auto-register the tool at startup, use `PI_PET_TOOL=1 pi`. To hard-disable it even for `/pet agent guide`, use `PI_PET_DISABLE_TOOL=1 pi`.
 
 ## Updates and pet storage
 

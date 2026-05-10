@@ -28,8 +28,19 @@ const CODEX_PETS_SEARCH_URL = `${CODEX_PETS_BASE}/api/pets`;
 const USAGE_CACHE_TTL_MS = 60_000;
 const USAGE_ERROR_CACHE_TTL_MS = 15_000;
 const PETDEX_SEARCH_CACHE_TTL_MS = 10 * 60_000;
+const petToolHardDisabled = envBool("PI_PET_DISABLE_TOOL", false);
+const petToolAutoRegister = envBool("PI_PET_TOOL", false) && !petToolHardDisabled;
+let petToolRegistered = false;
 
 type JsonRecord = Record<string, unknown>;
+
+function envBool(name: string, defaultValue: boolean): boolean {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (!raw) return defaultValue;
+  if (["1", "true", "yes", "on", "enabled"].includes(raw)) return true;
+  if (["0", "false", "no", "off", "disabled"].includes(raw)) return false;
+  return defaultValue;
+}
 
 type UsageLimit = {
   label: string;
@@ -513,7 +524,7 @@ function petCommandUsage(): string {
     "  /pet use <installed-slug>",
     "  /pet list",
     "  /pet current",
-    "  /pet agent guide",
+    ...(petToolHardDisabled ? [] : ["  /pet agent guide"]),
     "",
     "Bare install names use Petdex. Use a codex-pets.net URL for Codex Pets.",
   ].join("\n");
@@ -889,9 +900,13 @@ async function getPetCompletions(prefix: string): Promise<CompletionItem[] | nul
       { value: "ls", label: "ls", description: "Alias for list" },
       { value: "current", label: "current", description: "Show the active pet" },
       { value: "active", label: "active", description: "Alias for current" },
-      { value: "agent guide", label: "agent guide", description: "Add pi-pet tool guidance to this conversation" },
-      { value: "load guide", label: "load guide", description: "Alias for agent guide" },
-      { value: "guide", label: "guide", description: "Alias for agent guide" },
+      ...(petToolHardDisabled
+        ? []
+        : [
+            { value: "agent guide", label: "agent guide", description: "Enable the pi_pet tool and add pet guidance to this conversation" },
+            { value: "load guide", label: "load guide", description: "Alias for agent guide" },
+            { value: "guide", label: "guide", description: "Alias for agent guide" },
+          ]),
       { value: "help", label: "help", description: "Show /pet usage" },
       ...installedPetCompletions,
     ],
@@ -984,7 +999,44 @@ async function runPetToolAction(action: "list" | "current" | "use" | "install" |
   }
 }
 
+function activatePetTool(pi: ExtensionAPI): void {
+  const activeTools = pi.getActiveTools();
+  if (!activeTools.includes("pi_pet")) pi.setActiveTools([...activeTools, "pi_pet"]);
+}
+
+function registerPetTool(pi: ExtensionAPI, options: { activate?: boolean } = {}): boolean {
+  if (petToolHardDisabled) return false;
+
+  if (!petToolRegistered) {
+    pi.registerTool({
+      name: "pi_pet",
+      label: "Pi Pet",
+      description: "Manage the desktop pet: search Petdex/Codex Pets, list installed pets, show current pet, switch pets, or install a Petdex/Codex Pets pet.",
+      promptSnippet: "Manage the desktop pet with list/current/use/install/search actions.",
+      promptGuidelines: [
+        "Use pi_pet for agent-driven desktop pet changes instead of writing /pet slash commands or running /pet in bash.",
+        "Use pi_pet with action list before installing; if the requested pet is already installed, use action use instead of reinstalling.",
+        "Use pi_pet with action search for vague/descriptive requests or names with multiple variants; install the exact target returned by search, especially codex-pets.net URLs for Codex Pets results.",
+        "Examples: search Goku -> { action: 'search', target: 'goku' }; install Petdex Boba -> { action: 'install', target: 'boba' }; install Codex Son Goku -> { action: 'install', target: 'https://codex-pets.net/#/pets/son-goku' }; switch installed Boba -> { action: 'use', target: 'boba' }.",
+      ],
+      parameters: PetToolParams,
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        return runPetToolAction(params.action, params.target, ctx);
+      },
+    });
+    petToolRegistered = true;
+  }
+
+  if (options.activate) activatePetTool(pi);
+  return true;
+}
+
 function loadPetGuide(pi: ExtensionAPI, ctx: ExtensionContext): void {
+  if (!registerPetTool(pi, { activate: true })) {
+    ctx.ui.notify("pi_pet tool is disabled by PI_PET_DISABLE_TOOL=1", "warning");
+    return;
+  }
+
   pi.sendMessage(
     {
       customType: "pi-pet-guide",
@@ -1067,25 +1119,12 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
-    name: "pi_pet",
-    label: "Pi Pet",
-    description: "Manage the desktop pet: search Petdex/Codex Pets, list installed pets, show current pet, switch pets, or install a Petdex/Codex Pets pet.",
-    promptSnippet: "Manage the desktop pet with list/current/use/install/search actions.",
-    promptGuidelines: [
-      "Use pi_pet for agent-driven desktop pet changes instead of writing /pet slash commands or running /pet in bash.",
-      "Use pi_pet with action list before installing; if the requested pet is already installed, use action use instead of reinstalling.",
-      "Use pi_pet with action search for vague/descriptive requests or names with multiple variants; install the exact target returned by search, especially codex-pets.net URLs for Codex Pets results.",
-      "Examples: search Goku -> { action: 'search', target: 'goku' }; install Petdex Boba -> { action: 'install', target: 'boba' }; install Codex Son Goku -> { action: 'install', target: 'https://codex-pets.net/#/pets/son-goku' }; switch installed Boba -> { action: 'use', target: 'boba' }.",
-    ],
-    parameters: PetToolParams,
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      return runPetToolAction(params.action, params.target, ctx);
-    },
-  });
+  if (petToolAutoRegister) registerPetTool(pi);
 
   pi.registerCommand("pet", {
-    description: "Install, search, or switch the desktop pet: install <slug-or-url>, search <query>, use <slug>, list, current, agent guide",
+    description: petToolHardDisabled
+      ? "Install, search, or switch the desktop pet: install <slug-or-url>, search <query>, use <slug>, list, current"
+      : "Install, search, or switch the desktop pet: install <slug-or-url>, search <query>, use <slug>, list, current, agent guide",
     getArgumentCompletions: getPetCompletions,
     handler: async (args, ctx) => {
       const trimmed = args.trim();
