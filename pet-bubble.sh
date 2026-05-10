@@ -12,6 +12,7 @@ manager_state_file="$root_dir/manager-state.json"
 log_file="$root_dir/manager-powershell.log"
 dir_label="${PI_PET_BUBBLE_DIR:-$PWD}"
 owner_pid="${PI_PET_BUBBLE_PID:-$PPID}"
+user_pets_dir="${PI_PET_PETS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/pi-pet/pets}"
 manager_version="0.3.0"
 
 usage() {
@@ -110,16 +111,19 @@ ensure_started() {
   mkdir -p "$root_dir"
   cleanup_stale_rows
   stop_old_managers
-  local ps_script win_root win_state
+  local ps_script win_root win_state win_user_pets
+  mkdir -p "$user_pets_dir" || true
   ps_script="$(wslpath -w "$script_dir/pet-bubble.ps1")"
   win_root="$(wslpath -w "$root_dir")"
   win_state="$(wslpath -w "$manager_state_file")"
+  win_user_pets="$(wslpath -w "$user_pets_dir" 2>/dev/null || true)"
 
   # Safe to call repeatedly: pet-bubble.ps1 uses one global manager mutex.
   nohup powershell.exe -NoProfile -ExecutionPolicy Bypass \
     -File "$ps_script" \
     -RootPath "$win_root" \
     -StatePath "$win_state" \
+    -UserPetsPath "$win_user_pets" \
     -ManagerVersion "$manager_version" \
     >"$log_file" 2>&1 &
   disown || true

@@ -118,7 +118,7 @@ PI_PET_BUBBLE_ID=b PI_PET_BUBBLE_DIR=/project/b ./pet-bubble.sh answering "Answe
 
 ## Install pets
 
-Install a pet pack into `./pets/<slug>` and make it active:
+Install a pet pack into the persistent user pet store and make it active:
 
 ```bash
 ./pet-install.sh luffy
@@ -127,6 +127,15 @@ Install a pet pack into `./pets/<slug>` and make it active:
 ```
 
 Bare names/slugs use Petdex by default. To install from Codex Pets, pass a `codex-pets.net` pet URL.
+
+User-installed pets are stored outside the package checkout so they survive `pi update`:
+
+```text
+${XDG_DATA_HOME:-$HOME/.local/share}/pi-pet/pets/<slug>/
+${XDG_DATA_HOME:-$HOME/.local/share}/pi-pet/pets/active
+```
+
+The bundled `pets/default/` remains as a read-only fallback. If older installs are found under the package `pets/` directory, pi-pet copies them into the persistent store on startup.
 
 ## Image overlay helper
 

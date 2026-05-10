@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,8 +11,12 @@ const extensionDir = dirname(fileURLToPath(import.meta.url));
 const packageRoot = dirname(extensionDir);
 const bubbleScript = join(packageRoot, "pet-bubble.sh");
 const petInstallScript = join(packageRoot, "pet-install.sh");
-const petsDir = join(packageRoot, "pets");
+const bundledPetsDir = join(packageRoot, "pets");
+const userDataRoot = process.env.XDG_DATA_HOME?.trim() || join(homedir(), ".local", "share");
+const configuredPetsDir = process.env.PI_PET_PETS_DIR?.trim();
+const petsDir = configuredPetsDir || join(userDataRoot, "pi-pet", "pets");
 const activePetFile = join(petsDir, "active");
+const legacyActivePetFile = join(bundledPetsDir, "active");
 const usageFile = join(packageRoot, "tmp", "pet-bubbles", instanceId, "usage.json");
 const PROVIDER_ID = "openai-codex";
 const CODEX_AUTH_PATH = join(homedir(), ".codex", "auth.json");
@@ -57,6 +61,7 @@ function bubbleEnv(projectCwd: string) {
     PI_PET_BUBBLE_ID: instanceId,
     PI_PET_BUBBLE_DIR: projectCwd,
     PI_PET_BUBBLE_PID: String(process.pid),
+    PI_PET_PETS_DIR: petsDir,
   };
 }
 
@@ -583,36 +588,84 @@ function runProcess(command: string, args: string[], options: { cwd?: string; en
   });
 }
 
-async function readActivePet(): Promise<string | undefined> {
+let petStorageMigrationPromise: Promise<void> | undefined;
+
+async function migrateLegacyPets(): Promise<void> {
   try {
-    const active = (await readFile(activePetFile, "utf8")).trim();
-    return active || undefined;
+    await mkdir(petsDir, { recursive: true });
   } catch {
-    return undefined;
+    return;
+  }
+
+  if (existsSync(legacyActivePetFile) && !existsSync(activePetFile)) {
+    try {
+      const active = (await readFile(legacyActivePetFile, "utf8")).trim();
+      if (active && PET_SLUG_RE.test(active)) await writeFile(activePetFile, `${active}\n`, "utf8");
+    } catch {}
+  }
+
+  let entries: Array<{ isDirectory(): boolean; name: string }>;
+  try {
+    entries = await readdir(bundledPetsDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !PET_SLUG_RE.test(entry.name)) continue;
+    const source = join(bundledPetsDir, entry.name);
+    const dest = join(petsDir, entry.name);
+    if (!existsSync(join(source, "pet.json")) || existsSync(join(dest, "pet.json"))) continue;
+
+    try {
+      await cp(source, dest, { recursive: true });
+    } catch {
+      // Migration is best-effort; installed pets can always be reinstalled.
+    }
   }
 }
 
+async function ensurePetStorage(): Promise<void> {
+  petStorageMigrationPromise ??= migrateLegacyPets();
+  await petStorageMigrationPromise;
+}
+
+async function readActivePet(): Promise<string | undefined> {
+  await ensurePetStorage();
+  for (const path of [activePetFile, legacyActivePetFile]) {
+    try {
+      const active = (await readFile(path, "utf8")).trim();
+      if (active && PET_SLUG_RE.test(active) && [petsDir, bundledPetsDir].some((root) => existsSync(join(root, active, "pet.json")))) return active;
+    } catch {}
+  }
+  return undefined;
+}
+
 async function listInstalledPets(): Promise<InstalledPet[]> {
+  await ensurePetStorage();
   const active = await readActivePet();
-  let entries: Array<{ isDirectory(): boolean; name: string }>;
-  try {
-    entries = await readdir(petsDir, { withFileTypes: true });
-  } catch {
-    return [];
+  const bySlug = new Map<string, InstalledPet>();
+
+  for (const root of [bundledPetsDir, petsDir]) {
+    let entries: Array<{ isDirectory(): boolean; name: string }>;
+    try {
+      entries = await readdir(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !PET_SLUG_RE.test(entry.name)) continue;
+      const manifestPath = join(root, entry.name, "pet.json");
+      if (!existsSync(manifestPath)) continue;
+
+      const manifest = await readJsonObject(manifestPath);
+      const displayName = firstString(manifest, ["displayName", "name", "id"]) ?? entry.name;
+      bySlug.set(entry.name, { slug: entry.name, displayName, active: active === entry.name });
+    }
   }
 
-  const pets: InstalledPet[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !PET_SLUG_RE.test(entry.name)) continue;
-    const manifestPath = join(petsDir, entry.name, "pet.json");
-    if (!existsSync(manifestPath)) continue;
-
-    const manifest = await readJsonObject(manifestPath);
-    const displayName = firstString(manifest, ["displayName", "name", "id"]) ?? entry.name;
-    pets.push({ slug: entry.name, displayName, active: active === entry.name });
-  }
-
-  return pets.sort((a, b) => a.slug.localeCompare(b.slug));
+  return [...bySlug.values()].sort((a, b) => a.slug.localeCompare(b.slug));
 }
 
 function formatPetList(pets: InstalledPet[]): string {
@@ -848,8 +901,10 @@ async function getPetCompletions(prefix: string): Promise<CompletionItem[] | nul
 
 async function activatePet(slug: string): Promise<string> {
   assertPetSlug(slug);
-  const manifestPath = join(petsDir, slug, "pet.json");
-  if (!existsSync(manifestPath)) throw new Error(`Pet is not installed: ${slug}`);
+  await ensurePetStorage();
+
+  const installed = [petsDir, bundledPetsDir].some((root) => existsSync(join(root, slug, "pet.json")));
+  if (!installed) throw new Error(`Pet is not installed: ${slug}`);
 
   await mkdir(petsDir, { recursive: true });
   await writeFile(activePetFile, `${slug}\n`, "utf8");
@@ -859,6 +914,7 @@ async function activatePet(slug: string): Promise<string> {
 async function installPet(target: string): Promise<string> {
   if (!target.trim()) throw new Error("Pet target is required.");
   if (!existsSync(petInstallScript)) throw new Error(`Missing installer: ${petInstallScript}`);
+  await ensurePetStorage();
 
   const result = await runProcess("bash", [petInstallScript, target.trim()], {
     cwd: packageRoot,

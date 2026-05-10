@@ -2,7 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-pet_root="${PI_PET_PETS_DIR:-$script_dir/pets}"
+pet_root="${PI_PET_PETS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/pi-pet/pets}"
 
 usage() {
   cat <<'EOF'
@@ -16,8 +16,8 @@ Examples:
   ./pet-install.sh https://codex-pets.net/pets/dario
 
 Downloads a Petdex/Codex-compatible pet pack and installs it into:
-  ./pets/<slug>/pet.json
-  ./pets/<slug>/spritesheet.webp (or cleaned spritesheet.clean.png)
+  ${XDG_DATA_HOME:-$HOME/.local/share}/pi-pet/pets/<slug>/pet.json
+  ${XDG_DATA_HOME:-$HOME/.local/share}/pi-pet/pets/<slug>/spritesheet.webp (or cleaned spritesheet.clean.png)
 
 Bare names/slugs use Petdex by default. To install from Codex Pets,
 pass a codex-pets.net pet URL.

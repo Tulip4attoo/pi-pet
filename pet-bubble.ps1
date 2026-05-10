@@ -8,6 +8,8 @@ param(
     [double]$DefaultX = 120,
     [double]$DefaultY = 120,
 
+    [string]$UserPetsPath = "",
+
     [string]$ManagerVersion = "0.3.0"
 )
 
@@ -440,36 +442,66 @@ function Get-StatusStyle([string]$Status) {
     }
 }
 
+function Get-PetRootCandidates {
+    $roots = New-Object System.Collections.Generic.List[string]
+    $seen = @{}
+
+    foreach ($root in @($UserPetsPath, [string]$env:PI_PET_PETS_DIR, (Join-Path $PSScriptRoot "pets"))) {
+        if ([string]::IsNullOrWhiteSpace([string]$root)) { continue }
+        try {
+            $resolved = if (Test-Path -LiteralPath $root) { (Resolve-Path -LiteralPath $root).ProviderPath } else { [string]$root }
+            $key = $resolved.ToLowerInvariant()
+            if (-not $seen.ContainsKey($key)) {
+                $seen[$key] = $true
+                $roots.Add($resolved) | Out-Null
+            }
+        }
+        catch {}
+    }
+
+    return $roots.ToArray()
+}
+
+function Find-PetDirectory([string]$Slug, [string[]]$Roots) {
+    if ([string]::IsNullOrWhiteSpace($Slug) -or $Slug -notmatch '^[A-Za-z0-9._-]+$') { return $null }
+
+    foreach ($root in $Roots) {
+        $candidate = Join-Path $root $Slug
+        if (Test-Path -LiteralPath (Join-Path $candidate "pet.json")) { return $candidate }
+    }
+    return $null
+}
+
 function Get-DefaultPetDirectory {
     try {
-        $petsRoot = Join-Path $PSScriptRoot "pets"
-        if (-not (Test-Path -LiteralPath $petsRoot)) { return $null }
+        $roots = Get-PetRootCandidates
+        if ($roots.Count -eq 0) { return $null }
 
         $envPet = [string]$env:PI_PET_ACTIVE_PET
-        if (-not [string]::IsNullOrWhiteSpace($envPet) -and $envPet -match '^[A-Za-z0-9._-]+$') {
-            $candidate = Join-Path $petsRoot $envPet
-            if (Test-Path -LiteralPath (Join-Path $candidate "pet.json")) { return $candidate }
-        }
+        $envPetDir = Find-PetDirectory $envPet $roots
+        if ($null -ne $envPetDir) { return $envPetDir }
 
-        $activePath = Join-Path $petsRoot "active"
-        if (Test-Path -LiteralPath $activePath) {
+        foreach ($root in $roots) {
+            $activePath = Join-Path $root "active"
+            if (-not (Test-Path -LiteralPath $activePath)) { continue }
             $active = (Get-Content -LiteralPath $activePath -Raw -ErrorAction SilentlyContinue).Trim()
-            if ($active -match '^[A-Za-z0-9._-]+$') {
-                $candidate = Join-Path $petsRoot $active
-                if (Test-Path -LiteralPath (Join-Path $candidate "pet.json")) { return $candidate }
-            }
+            $activeDir = Find-PetDirectory $active $roots
+            if ($null -ne $activeDir) { return $activeDir }
         }
 
         foreach ($fallback in @("default", "einstein", "luffy")) {
-            $candidate = Join-Path $petsRoot $fallback
-            if (Test-Path -LiteralPath (Join-Path $candidate "pet.json")) { return $candidate }
+            $fallbackDir = Find-PetDirectory $fallback $roots
+            if ($null -ne $fallbackDir) { return $fallbackDir }
         }
 
-        $first = Get-ChildItem -LiteralPath $petsRoot -Directory -ErrorAction SilentlyContinue |
-            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "pet.json") } |
-            Sort-Object Name |
-            Select-Object -First 1
-        if ($null -ne $first) { return $first.FullName }
+        foreach ($root in $roots) {
+            if (-not (Test-Path -LiteralPath $root)) { continue }
+            $first = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+                Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "pet.json") } |
+                Sort-Object Name |
+                Select-Object -First 1
+            if ($null -ne $first) { return $first.FullName }
+        }
     }
     catch {}
     return $null
