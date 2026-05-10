@@ -1426,7 +1426,16 @@ $timer.Start()
 
 $petTimer = New-Object Windows.Threading.DispatcherTimer
 $petTimer.Interval = [TimeSpan]::FromMilliseconds(60)
-$petTimer.Add_Tick({ try { Update-PetFrame } catch {} })
+$petTimer.Add_Tick({
+    try {
+        if ($script:isDragging -and -not [string]::IsNullOrWhiteSpace([string]$script:dragPetState)) {
+            Update-DragPetFrame
+        }
+        else {
+            Update-PetFrame
+        }
+    } catch {}
+})
 $petTimer.Start()
 
 $window.Add_Closed({
