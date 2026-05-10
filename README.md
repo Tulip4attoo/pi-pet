@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Tulip4attoo/media_for_projects/master/pi-pet-image.gif" width="200" alt="Pi Pet demo" />
+</p>
+
 # Pi Pet
 
 A Codex-inspired desktop pet and status bubble for [pi](https://pi.dev) on Windows/WSL. It shows working status and Codex subscription usage, so you do not miss when a session is done.
