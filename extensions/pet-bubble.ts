@@ -27,6 +27,7 @@ const CODEX_PETS_BASE = "https://codex-pets.net";
 const CODEX_PETS_SEARCH_URL = `${CODEX_PETS_BASE}/api/pets`;
 const USAGE_CACHE_TTL_MS = 60_000;
 const USAGE_ERROR_CACHE_TTL_MS = 15_000;
+const USAGE_REFRESH_INTERVAL_MS = 60_000;
 const PETDEX_SEARCH_CACHE_TTL_MS = 10 * 60_000;
 const petToolHardDisabled = envBool("PI_PET_DISABLE_TOOL", false);
 const petToolAutoRegister = envBool("PI_PET_TOOL", false) && !petToolHardDisabled;
@@ -1084,25 +1085,50 @@ async function chooseInstalledPet(ctx: ExtensionContext): Promise<string | undef
 }
 
 export default function (pi: ExtensionAPI) {
+  let usageRefreshTimer: ReturnType<typeof setInterval> | undefined;
+  let latestUsageCtx: ExtensionContext | undefined;
+
+  function startUsageRefreshTimer(ctx: ExtensionContext): void {
+    latestUsageCtx = ctx;
+    if (usageRefreshTimer) return;
+    usageRefreshTimer = setInterval(() => {
+      if (!latestUsageCtx) return;
+      void refreshUsage(latestUsageCtx).catch(() => undefined);
+    }, USAGE_REFRESH_INTERVAL_MS);
+    (usageRefreshTimer as { unref?: () => void }).unref?.();
+  }
+
+  function stopUsageRefreshTimer(): void {
+    if (usageRefreshTimer) clearInterval(usageRefreshTimer);
+    usageRefreshTimer = undefined;
+    latestUsageCtx = undefined;
+  }
+
   pi.on("session_start", async (_event, ctx) => {
+    startUsageRefreshTimer(ctx);
     runBubble(ctx.cwd, ["start", "finished", "Ready"]);
     void refreshUsage(ctx, { refresh: true });
   });
 
   pi.on("model_select", async (event, ctx) => {
+    startUsageRefreshTimer(ctx);
     void refreshUsage(ctx, { refresh: true, model: (event as any).model });
   });
 
   pi.on("agent_start", async (_event, ctx) => {
+    startUsageRefreshTimer(ctx);
     runBubble(ctx.cwd, ["thinking", "Working..."]);
+    void refreshUsage(ctx);
   });
 
   pi.on("agent_end", async (_event, ctx) => {
+    startUsageRefreshTimer(ctx);
     runBubble(ctx.cwd, ["finished", "Finished"]);
     void refreshUsage(ctx, { refresh: true });
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
+    stopUsageRefreshTimer();
     if (event.reason === "reload") {
       runBubble(ctx.cwd, ["finished", "Reloading..."]);
     } else {
