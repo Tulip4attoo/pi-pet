@@ -100,23 +100,41 @@ PY
   done
 }
 
-stop_old_managers() {
-  # One-time migration helper: terminate older pet-bubble.ps1 managers that do not carry this version marker.
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
-    "\$version = '$manager_version'; Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -like '*pet-bubble.ps1*' -and \$_.CommandLine -notlike ('*-ManagerVersion ' + \$version + '*') } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }" \
-    >/dev/null 2>&1 || true
+windows_exe_interop_available() {
+  [[ -S "${WSL_INTEROP:-}" ]] || return 1
+  [[ -e /proc/sys/fs/binfmt_misc/WSLInterop || -e /proc/sys/fs/binfmt_misc/WSLInterop-late ]] || return 1
+}
+
+stop_conflicting_managers() {
+  local win_root="$1"
+  # Terminate older managers, plus same-version managers polling a different package tmp root.
+  # This matters after `pi update`, where the extension checkout/root may move while the
+  # old Windows manager still owns the global mutex and watches the previous RootPath.
+  PI_PET_MANAGER_VERSION="$manager_version" PI_PET_WIN_ROOT="$win_root" \
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
+      "\$version = \$env:PI_PET_MANAGER_VERSION; \$root = \$env:PI_PET_WIN_ROOT; Get-CimInstance Win32_Process | Where-Object { \$_.ProcessId -ne \$PID -and \$_.CommandLine -like '*pet-bubble.ps1*' -and (\$_.CommandLine -notlike ('*-ManagerVersion ' + \$version + '*') -or \$_.CommandLine -notlike ('*' + \$root + '*')) } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }" \
+      >/dev/null 2>&1 || true
 }
 
 ensure_started() {
   mkdir -p "$root_dir"
   cleanup_stale_rows
-  stop_old_managers
   local ps_script win_root win_state win_user_pets
   mkdir -p "$user_pets_dir" || true
   ps_script="$(wslpath -w "$script_dir/pet-bubble.ps1")"
   win_root="$(wslpath -w "$root_dir")"
   win_state="$(wslpath -w "$manager_state_file")"
   win_user_pets="$(wslpath -w "$user_pets_dir" 2>/dev/null || true)"
+
+  if ! windows_exe_interop_available; then
+    {
+      echo "WSL Windows-exe interop is not available; cannot start pet-bubble.ps1."
+      echo "Check /proc/sys/fs/binfmt_misc/WSLInterop and WSL_INTEROP, then restart WSL with: wsl.exe --shutdown"
+    } >"$log_file"
+    return 0
+  fi
+
+  stop_conflicting_managers "$win_root"
 
   # Safe to call repeatedly: pet-bubble.ps1 uses one global manager mutex.
   nohup powershell.exe -NoProfile -ExecutionPolicy Bypass \

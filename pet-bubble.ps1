@@ -428,6 +428,8 @@ function Save-State {
         @{
             x = [Math]::Round($window.Left, 0)
             y = [Math]::Round($window.Top, 0)
+            showResetTime = [bool]$script:showResetTimeLabel
+            resetTimePreferenceSet = [bool]$script:resetTimePreferenceSet
         } | ConvertTo-Json -Compress | Set-Content -LiteralPath $StatePath -Encoding UTF8
     }
     catch {}
@@ -807,6 +809,38 @@ function New-UsageArcGeometry([double]$CenterX, [double]$CenterY, [double]$Radiu
     return $geometry
 }
 
+function New-WeeklyTimeGeometry([double]$CenterX, [double]$CenterY, [double]$Radius, [double]$RemainingDays) {
+    $days = [Math]::Max(0.0, [Math]::Min(7.0, $RemainingDays))
+    if ($days -le 0.001) { return [Windows.Media.Geometry]::Empty }
+
+    $geometry = New-Object Windows.Media.PathGeometry
+    $segmentSpan = 100.0 / 7.0
+    $gap = 1.8
+
+    for ($index = 0; $index -lt 7; $index++) {
+        $fill = [Math]::Max(0.0, [Math]::Min(1.0, $days - $index))
+        if ($fill -le 0.001) { continue }
+
+        $startPercent = ($index * $segmentSpan) + ($gap / 2.0)
+        $drawableSpan = $segmentSpan - $gap
+        $endPercent = $startPercent + ($drawableSpan * $fill)
+        $figure = New-Object Windows.Media.PathFigure
+        $figure.StartPoint = Get-UsageRingPoint $CenterX $CenterY $Radius $startPercent
+        $figure.IsClosed = $false
+        $figure.IsFilled = $false
+
+        $arc = New-Object Windows.Media.ArcSegment
+        $arc.Point = Get-UsageRingPoint $CenterX $CenterY $Radius $endPercent
+        $arc.Size = New-Object Windows.Size $Radius, $Radius
+        $arc.SweepDirection = [Windows.Media.SweepDirection]::Counterclockwise
+        $arc.IsLargeArc = $false
+        $figure.Segments.Add($arc) | Out-Null
+        $geometry.Figures.Add($figure) | Out-Null
+    }
+
+    return $geometry
+}
+
 function New-UsageLabel {
     $border = New-Object Windows.Controls.Border
     $border.Width = 54
@@ -833,6 +867,40 @@ function Format-UsagePercent([double]$Percent) {
     return ("{0}%" -f [Math]::Round([Math]::Max(0.0, [Math]::Min(100.0, $Percent))))
 }
 
+function New-ResetTimeLabel {
+    $border = New-Object Windows.Controls.Border
+    $border.Width = 104
+    $border.Height = 25
+    $border.CornerRadius = New-Object Windows.CornerRadius 9
+    $border.BorderThickness = New-Object Windows.Thickness 1
+    $border.BorderBrush = [Windows.Media.BrushConverter]::new().ConvertFromString("#9960A5FA")
+    $border.Background = [Windows.Media.BrushConverter]::new().ConvertFromString("#E60B1220")
+    $border.Visibility = [Windows.Visibility]::Collapsed
+    $border.IsHitTestVisible = $false
+
+    $text = New-Object Windows.Controls.TextBlock
+    $text.FontFamily = New-Object Windows.Media.FontFamily "Segoe UI"
+    $text.FontSize = 12
+    $text.FontWeight = [Windows.FontWeights]::SemiBold
+    $text.Foreground = [Windows.Media.BrushConverter]::new().ConvertFromString("#FFDCEBFE")
+    $text.HorizontalAlignment = [Windows.HorizontalAlignment]::Center
+    $text.VerticalAlignment = [Windows.VerticalAlignment]::Center
+    $text.TextAlignment = [Windows.TextAlignment]::Center
+    $border.Child = $text
+    return $border
+}
+
+function Format-ResetTime([double]$RemainingMs) {
+    if ($RemainingMs -le 0) { return "resetting" }
+    $totalMinutes = [Math]::Max(1, [Math]::Ceiling($RemainingMs / 60000.0))
+    $days = [Math]::Floor($totalMinutes / 1440.0)
+    $hours = [Math]::Floor(($totalMinutes % 1440) / 60.0)
+    $minutes = $totalMinutes % 60
+    if ($days -gt 0) { return ("{0}d {1}h" -f $days, $hours) }
+    if ($hours -gt 0) { return ("{0}h {1}m" -f $hours, $minutes) }
+    return ("{0}m" -f $minutes)
+}
+
 function Set-UsageLabel($Label, [double]$CenterX, [double]$CenterY, [double]$Radius, [double]$Percent, $Brush, [double]$CanvasSize) {
     if ($null -eq $Label) { return }
     $Label.Child.Text = Format-UsagePercent $Percent
@@ -845,7 +913,7 @@ function Set-UsageLabel($Label, [double]$CenterX, [double]$CenterY, [double]$Rad
 }
 
 function Set-UsageRingVisibility([Windows.Visibility]$Visibility) {
-    foreach ($element in @($script:outerUsageTrack, $script:innerUsageTrack, $script:outerUsagePath, $script:innerUsagePath, $script:outerUsageLabel, $script:innerUsageLabel)) {
+    foreach ($element in @($script:outerUsageTrack, $script:innerUsageTrack, $script:outerUsagePath, $script:innerUsagePath, $script:outerUsageLabel, $script:innerUsageLabel, $script:resetTimeLabel)) {
         if ($null -ne $element) { $element.Visibility = $Visibility }
     }
 }
@@ -857,59 +925,77 @@ function Find-UsageLimit($Usage, [string[]]$Labels, [int]$FallbackIndex) {
         $match = $limits | Where-Object { $_.label -and ([string]$_.label).ToLowerInvariant() -eq $label.ToLowerInvariant() } | Select-Object -First 1
         if ($null -ne $match) { return $match }
     }
-    if ($limits.Count -gt $FallbackIndex) { return $limits[$FallbackIndex] }
+    if ($FallbackIndex -ge 0 -and $limits.Count -gt $FallbackIndex) { return $limits[$FallbackIndex] }
     return $null
+}
+
+function Update-WeeklyTimeRing([switch]$Force) {
+    if ($null -eq $script:innerUsageTrack -or $null -eq $script:innerUsagePath -or $null -eq $script:resetTimeLabel) { return }
+    if ($null -eq $script:weeklyResetAtMs -or [double]$script:weeklyResetAtMs -le 0) {
+        $script:innerUsageTrack.Visibility = [Windows.Visibility]::Collapsed
+        $script:innerUsagePath.Visibility = [Windows.Visibility]::Collapsed
+        $script:resetTimeLabel.Visibility = [Windows.Visibility]::Collapsed
+        return
+    }
+
+    $now = [DateTime]::UtcNow
+    if (-not $Force -and ($now - $script:lastWeeklyTimeUpdateUtc).TotalSeconds -lt 30) { return }
+    $script:lastWeeklyTimeUpdateUtc = $now
+    $epoch = [DateTime]::new(1970, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+    $nowMs = ($now - $epoch).TotalMilliseconds
+    $remainingMs = [Math]::Max(0.0, [double]$script:weeklyResetAtMs - $nowMs)
+    $remainingDays = [Math]::Min(7.0, $remainingMs / 86400000.0)
+    $center = [double]$script:petRingCenter
+    $innerRadius = [double]$script:petInnerRingRadius
+
+    $script:innerUsageTrack.Data = New-WeeklyTimeGeometry $center $center $innerRadius 7.0
+    $script:innerUsagePath.Data = New-WeeklyTimeGeometry $center $center $innerRadius $remainingDays
+    $script:innerUsageTrack.Visibility = [Windows.Visibility]::Visible
+    $script:innerUsagePath.Visibility = [Windows.Visibility]::Visible
+    $script:resetTimeLabel.Child.Text = "reset $(Format-ResetTime $remainingMs)"
+    $script:resetTimeLabel.Visibility = if ($script:showResetTimeLabel) { [Windows.Visibility]::Visible } else { [Windows.Visibility]::Collapsed }
 }
 
 function Update-UsageRings($Usage) {
     if ($null -eq $script:outerUsagePath -or $null -eq $script:innerUsagePath) { return }
 
-    $primary = Find-UsageLimit $Usage @("5h", "primary") 0
-    $secondary = Find-UsageLimit $Usage @("7d", "weekly", "secondary") 1
-    if ($null -eq $primary -and $null -eq $secondary) {
+    # Codex now exposes one weekly allowance. Prefer an explicitly weekly limit,
+    # but accept the sole returned limit for API variants that still call it primary.
+    $weekly = Find-UsageLimit $Usage @("7d", "weekly", "secondary") -1
+    if ($null -eq $weekly -and $Usage -and ($Usage.PSObject.Properties.Name -contains "limits")) {
+        $limits = @($Usage.limits)
+        if ($limits.Count -eq 1) { $weekly = $limits[0] }
+    }
+    if ($null -eq $weekly) {
+        $script:weeklyResetAtMs = $null
         Set-UsageRingVisibility ([Windows.Visibility]::Collapsed)
         return
     }
 
-    Set-UsageRingVisibility ([Windows.Visibility]::Visible)
     $center = if ($script:petRingCenter) { [double]$script:petRingCenter } else { 95.0 }
     $outerRadius = if ($script:petOuterRingRadius) { [double]$script:petOuterRingRadius } else { 82.0 }
-    $innerRadius = if ($script:petInnerRingRadius) { [double]$script:petInnerRingRadius } else { 69.0 }
     $canvasSize = if ($script:petRingSize) { [double]$script:petRingSize } else { 190.0 }
     $labelsMode = ([string]$env:PI_PET_USAGE_LABELS).ToLowerInvariant()
     if ([string]::IsNullOrWhiteSpace($labelsMode)) { $labelsMode = "off" }
 
-    if ($null -ne $primary) {
-        $percent = [double]$primary.remainingPercent
-        $brush = Get-UsageRingColor $percent "primary"
-        $script:outerUsagePath.Data = New-UsageArcGeometry $center $center $outerRadius $percent
-        $script:outerUsagePath.Stroke = $brush
-        if ($labelsMode -eq "off") { $script:outerUsageLabel.Visibility = [Windows.Visibility]::Collapsed }
-        else {
-            $script:outerUsageLabel.Visibility = [Windows.Visibility]::Visible
-            Set-UsageLabel $script:outerUsageLabel $center $center $outerRadius $percent $brush $canvasSize
-        }
-    }
+    $percent = [double]$weekly.remainingPercent
+    $brush = Get-UsageRingColor $percent "primary"
+    $script:outerUsageTrack.Visibility = [Windows.Visibility]::Visible
+    $script:outerUsagePath.Visibility = [Windows.Visibility]::Visible
+    $script:outerUsagePath.Data = New-UsageArcGeometry $center $center $outerRadius $percent
+    $script:outerUsagePath.Stroke = $brush
+    if ($labelsMode -eq "off") { $script:outerUsageLabel.Visibility = [Windows.Visibility]::Collapsed }
     else {
-        $script:outerUsagePath.Visibility = [Windows.Visibility]::Collapsed
-        $script:outerUsageLabel.Visibility = [Windows.Visibility]::Collapsed
+        $script:outerUsageLabel.Visibility = [Windows.Visibility]::Visible
+        Set-UsageLabel $script:outerUsageLabel $center $center $outerRadius $percent $brush $canvasSize
     }
+    $script:innerUsageLabel.Visibility = [Windows.Visibility]::Collapsed
 
-    if ($null -ne $secondary) {
-        $percent = [double]$secondary.remainingPercent
-        $brush = Get-UsageRingColor $percent "secondary"
-        $script:innerUsagePath.Data = New-UsageArcGeometry $center $center $innerRadius $percent
-        $script:innerUsagePath.Stroke = $brush
-        if ($labelsMode -eq "off") { $script:innerUsageLabel.Visibility = [Windows.Visibility]::Collapsed }
-        else {
-            $script:innerUsageLabel.Visibility = [Windows.Visibility]::Visible
-            Set-UsageLabel $script:innerUsageLabel $center $center $innerRadius $percent $brush $canvasSize
-        }
+    $script:weeklyResetAtMs = $null
+    if ($weekly.PSObject.Properties.Name -contains "resetAtMs") {
+        try { $script:weeklyResetAtMs = [double]$weekly.resetAtMs } catch {}
     }
-    else {
-        $script:innerUsagePath.Visibility = [Windows.Visibility]::Collapsed
-        $script:innerUsageLabel.Visibility = [Windows.Visibility]::Collapsed
-    }
+    Update-WeeklyTimeRing -Force
 }
 
 function New-UsageEllipse([double]$Radius, [double]$Center, [double]$Thickness, [string]$Color) {
@@ -944,11 +1030,23 @@ function New-PetContextMenu {
     $showItem.Header = "Show window"
     $showItem.Add_Click({ Activate-DefaultBubbleTarget })
 
+    $resetTimeItem = New-Object Windows.Controls.MenuItem
+    $resetTimeItem.Header = "Show reset time"
+    $resetTimeItem.IsCheckable = $true
+    $resetTimeItem.IsChecked = [bool]$script:showResetTimeLabel
+    $resetTimeItem.Add_Click({
+        $script:showResetTimeLabel = [bool]$this.IsChecked
+        $script:resetTimePreferenceSet = $true
+        Update-WeeklyTimeRing -Force
+        Save-State
+    })
+
     $closeItem = New-Object Windows.Controls.MenuItem
     $closeItem.Header = "Close pet"
     $closeItem.Add_Click({ Remove-DefaultBubbleTarget })
 
     $menu.Items.Add($showItem) | Out-Null
+    $menu.Items.Add($resetTimeItem) | Out-Null
     $menu.Items.Add($closeItem) | Out-Null
     return $menu
 }
@@ -979,9 +1077,10 @@ function New-PetView {
     $script:petOuterRingRadius = $script:petRingCenter - $ringMargin
     $script:petInnerRingRadius = $script:petOuterRingRadius - $ringGap
 
+    $resetLabelSpace = 30.0
     $root = New-Object Windows.Controls.Grid
     $root.Width = $script:petRingSize
-    $root.Height = $script:petRingSize
+    $root.Height = $script:petRingSize + $resetLabelSpace
     $root.Margin = New-Object Windows.Thickness 0, 0, 10, 0
     $root.VerticalAlignment = [Windows.VerticalAlignment]::Bottom
     $root.Background = [Windows.Media.Brushes]::Transparent
@@ -992,11 +1091,14 @@ function New-PetView {
     $ringCanvas = New-Object Windows.Controls.Canvas
     $ringCanvas.Width = $script:petRingSize
     $ringCanvas.Height = $script:petRingSize
+    $ringCanvas.VerticalAlignment = [Windows.VerticalAlignment]::Top
 
     $script:outerUsageTrack = New-UsageEllipse $script:petOuterRingRadius $script:petRingCenter 7 "#3AFFFFFF"
-    $script:innerUsageTrack = New-UsageEllipse $script:petInnerRingRadius $script:petRingCenter 5 "#28FFFFFF"
+    $script:innerUsageTrack = New-UsagePath 5
+    $script:innerUsageTrack.Stroke = [Windows.Media.BrushConverter]::new().ConvertFromString("#28FFFFFF")
     $script:outerUsagePath = New-UsagePath 7
     $script:innerUsagePath = New-UsagePath 5
+    $script:innerUsagePath.Stroke = [Windows.Media.BrushConverter]::new().ConvertFromString("#FF60A5FA")
 
     $ringCanvas.Children.Add($script:outerUsageTrack) | Out-Null
     $ringCanvas.Children.Add($script:innerUsageTrack) | Out-Null
@@ -1011,20 +1113,28 @@ function New-PetView {
     $image.SnapsToDevicePixels = $true
     $image.IsHitTestVisible = $false
     $image.HorizontalAlignment = [Windows.HorizontalAlignment]::Center
-    $image.VerticalAlignment = [Windows.VerticalAlignment]::Center
+    $image.VerticalAlignment = [Windows.VerticalAlignment]::Top
+    $image.Margin = New-Object Windows.Thickness 0, (($script:petRingSize - $script:petRenderHeight) / 2.0), 0, 0
     $image.SetValue([Windows.Media.RenderOptions]::BitmapScalingModeProperty, [Windows.Media.BitmapScalingMode]::NearestNeighbor)
     $image.SetValue([Windows.Media.RenderOptions]::EdgeModeProperty, [Windows.Media.EdgeMode]::Aliased)
     $root.Children.Add($image) | Out-Null
 
     $labelCanvas = New-Object Windows.Controls.Canvas
     $labelCanvas.Width = $script:petRingSize
-    $labelCanvas.Height = $script:petRingSize
+    $labelCanvas.Height = $script:petRingSize + $resetLabelSpace
+    $labelCanvas.VerticalAlignment = [Windows.VerticalAlignment]::Top
     $script:outerUsageLabel = New-UsageLabel
     $script:innerUsageLabel = New-UsageLabel
+    $script:resetTimeLabel = New-ResetTimeLabel
+    [Windows.Controls.Canvas]::SetLeft($script:resetTimeLabel, ($script:petRingSize - $script:resetTimeLabel.Width) / 2.0)
+    [Windows.Controls.Canvas]::SetTop($script:resetTimeLabel, $script:petRingSize + 5.0)
     $labelCanvas.Children.Add($script:outerUsageLabel) | Out-Null
     $labelCanvas.Children.Add($script:innerUsageLabel) | Out-Null
+    $labelCanvas.Children.Add($script:resetTimeLabel) | Out-Null
     $root.Children.Add($labelCanvas) | Out-Null
 
+    $script:weeklyResetAtMs = $null
+    $script:lastWeeklyTimeUpdateUtc = [DateTime]::MinValue
     $script:petImage = $image
     $script:petBaseState = "idle"
     $script:petCurrentState = ""
@@ -1269,6 +1379,14 @@ Ensure-ParentDirectory $StatePath
 $script:wslRoot = Get-WslRootFromUnc $RootPath
 
 $state = Read-JsonFile $StatePath
+$script:showResetTimeLabel = $false
+$script:resetTimePreferenceSet = $false
+if ($state -and ($state.PSObject.Properties.Name -contains "resetTimePreferenceSet")) {
+    try { $script:resetTimePreferenceSet = [bool]$state.resetTimePreferenceSet } catch {}
+}
+if ($script:resetTimePreferenceSet -and $state -and ($state.PSObject.Properties.Name -contains "showResetTime")) {
+    try { $script:showResetTimeLabel = [bool]$state.showResetTime } catch {}
+}
 $hasSavedPosition = $state -and ($state.PSObject.Properties.Name -contains "x") -and ($state.PSObject.Properties.Name -contains "y")
 if ($hasSavedPosition) {
     $x = [double]$state.x
@@ -1447,6 +1565,7 @@ $timer.Add_Tick({
     try {
         Scan-Commands
         Scan-Usage
+        Update-WeeklyTimeRing
         $now = [DateTime]::UtcNow
         if (($now - $script:lastWatchdogUtc).TotalSeconds -ge 1) {
             $script:lastWatchdogUtc = $now

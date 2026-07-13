@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Tulip4attoo/media_for_projects/master/pi-pet-image.gif" width="200" alt="Pi Pet demo" />
+  <img src="https://raw.githubusercontent.com/Tulip4attoo/media_for_projects/master/pi-pet-image-261307.gif" width="200" alt="Pi Pet demo" />
 </p>
 
 # Pi Pet
@@ -7,15 +7,15 @@
 A Codex-inspired desktop pet and status bubble for [pi](https://pi.dev) on Windows/WSL. It shows working status and Codex subscription usage, so you do not miss when a session is done.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Tulip4attoo/media_for_projects/master/pi-pet-0.3.gif" width="720" alt="Pi Pet demo" />
+  <img src="https://raw.githubusercontent.com/Tulip4attoo/media_for_projects/master/pi-pet-261307.gif" width="720" alt="Pi Pet demo" />
 </p>
 
 ## Features
 
 - Animated desktop pet for pi sessions
 - Ready / Working / Finished status bubble
-- Codex subscription usage rings when using a Codex model
-- [Petdex](https://petdex.crafter.run/) and [Codex Pets](https://codex-pets.net/) support - you could use pet from both.
+- Weekly Codex usage and reset progress rings when using a Codex model
+- [Petdex](https://petdex.crafter.run/) and [Codex Pets](https://codex-pets.net/) support
 - Multiple pi sessions in one overlay
 - Click to focus the terminal, drag to move, right-click for actions
 - Opt in with `/pet agent guide` to let pi install or switch pets from chat
@@ -52,6 +52,22 @@ Pi Pet follows pi session events automatically. You can manage pets with:
 /pet use luffy
 /pet current
 ```
+
+### Codex usage rings
+
+When the selected model uses the Codex provider, two rings appear around the pet:
+
+- The outer ring shows the weekly allowance remaining.
+- The inner ring has seven day-sized segments and counts down to the weekly reset. The current segment drains gradually through the day.
+
+The exact reset countdown is hidden by default because the rings are usually enough. Right-click the pet and toggle **Show reset time** to display it; the choice is remembered. Usage rings are hidden for non-Codex models or when usage data is unavailable.
+
+### Desktop controls
+
+- Click a session bubble to focus its terminal.
+- Click the pet to wave and focus the latest session.
+- Drag left or right to move the overlay with directional running animations.
+- Right-click the pet to show the reset countdown, focus the terminal, or close the pet.
 
 ## LLM pet tool is opt-in
 
