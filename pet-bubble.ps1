@@ -1344,7 +1344,8 @@ function Scan-Usage {
     $dirs = Get-ChildItem -LiteralPath $RootPath -Directory -ErrorAction SilentlyContinue
     $latest = $null
     $latestScore = -1.0
-    $latestKey = ""
+    $latestKey = "none"
+    $sawDisabledUsage = $false
 
     foreach ($dir in $dirs) {
         $usagePath = Join-Path $dir.FullName "usage.json"
@@ -1355,6 +1356,13 @@ function Scan-Usage {
 
         $usage = Read-JsonFile $usagePath
         if ($null -eq $usage) { continue }
+
+        # A non-Codex session publishes a disabled payload for its own row. Do not
+        # let that newer payload hide valid rings supplied by another Codex session.
+        if (($usage.PSObject.Properties.Name -contains "disabled") -and [bool]$usage.disabled) {
+            $sawDisabledUsage = $true
+            continue
+        }
 
         $score = [double]$file.LastWriteTimeUtc.Ticks
         if ($usage.PSObject.Properties.Name -contains "fetchedAt") {
@@ -1368,6 +1376,7 @@ function Scan-Usage {
         }
     }
 
+    if ($null -eq $latest -and $sawDisabledUsage) { $latestKey = "disabled" }
     if ($latestKey -ne $script:lastUsageKey) {
         $script:lastUsageKey = $latestKey
         Update-UsageRings $latest

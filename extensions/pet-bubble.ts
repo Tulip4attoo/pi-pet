@@ -377,6 +377,13 @@ async function hideUsageRings(reason: string): Promise<void> {
   await writeUsagePayload({ seq: now, source: "disabled", disabled: true, reason, limits: [], fetchedAt: now });
 }
 
+async function writeCachedUsageIfAvailable(): Promise<boolean> {
+  const summary = usageCache.summary;
+  if (!summary || summary.limits.length === 0) return false;
+  await writeUsageFile(summary);
+  return true;
+}
+
 async function refreshUsage(ctx: ExtensionContext, options?: { refresh?: boolean; model?: unknown }): Promise<void> {
   try {
     if (!isCodexModel(ctx, options?.model)) {
@@ -387,8 +394,9 @@ async function refreshUsage(ctx: ExtensionContext, options?: { refresh?: boolean
 
     const resolved = await resolveCodexToken(ctx);
     if (!resolved) {
-      usageCache = { expiresAt: Date.now() + USAGE_ERROR_CACHE_TTL_MS };
-      await hideUsageRings("no-codex-token");
+      const previousSummary = usageCache.summary;
+      usageCache = { expiresAt: Date.now() + USAGE_ERROR_CACHE_TTL_MS, summary: previousSummary };
+      if (!(await writeCachedUsageIfAvailable())) await hideUsageRings("no-codex-token");
       return;
     }
 
@@ -399,25 +407,34 @@ async function refreshUsage(ctx: ExtensionContext, options?: { refresh?: boolean
     }
     if (!options?.refresh && usageCache.token === resolved.token && usageCache.promise) {
       const summary = await usageCache.promise;
-      if (summary.limits.length === 0) await hideUsageRings("no-usage-limits");
-      else await writeUsageFile(summary);
+      if (summary.limits.length === 0) {
+        if (!(await writeCachedUsageIfAvailable())) await hideUsageRings("no-usage-limits");
+      } else {
+        await writeUsageFile(summary);
+      }
       return;
     }
 
+    const previousSummary = usageCache.summary;
     const promise = fetchUsageSummary(resolved.token, resolved.accountId);
-    usageCache = { token: resolved.token, expiresAt: now + USAGE_CACHE_TTL_MS, promise };
+    // Keep the last successful value while a refresh is in flight. Agent start/end
+    // events can overlap, and dropping it here made one failed request hide the rings.
+    usageCache = { token: resolved.token, expiresAt: now + USAGE_CACHE_TTL_MS, summary: previousSummary, promise };
     const summary = await promise;
     if (summary.limits.length === 0) {
-      usageCache = { token: resolved.token, expiresAt: Date.now() + USAGE_ERROR_CACHE_TTL_MS };
-      await hideUsageRings("no-usage-limits");
+      usageCache = { token: resolved.token, expiresAt: Date.now() + USAGE_ERROR_CACHE_TTL_MS, summary: previousSummary };
+      if (!(await writeCachedUsageIfAvailable())) await hideUsageRings("no-usage-limits");
       return;
     }
 
     usageCache = { token: resolved.token, expiresAt: Date.now() + USAGE_CACHE_TTL_MS, summary };
     await writeUsageFile(summary);
   } catch {
-    usageCache = { token: usageCache.token, expiresAt: Date.now() + USAGE_ERROR_CACHE_TTL_MS };
-    try { await hideUsageRings("usage-refresh-failed"); } catch {}
+    const previousSummary = usageCache.summary;
+    usageCache = { token: usageCache.token, expiresAt: Date.now() + USAGE_ERROR_CACHE_TTL_MS, summary: previousSummary };
+    // A network/API failure is transient. Keep the last successful reading rather
+    // than publishing a newer disabled payload that makes the overlay disappear.
+    try { await writeCachedUsageIfAvailable(); } catch {}
     // Usage rings are cosmetic; never break pi because usage failed.
   }
 }
