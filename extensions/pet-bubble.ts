@@ -226,7 +226,7 @@ async function readJsonObject(path: string): Promise<JsonRecord> {
   }
 }
 
-function currentCodexCredential(ctx: ExtensionContext): unknown {
+function legacyCodexCredential(ctx: ExtensionContext): unknown {
   try {
     const authStorage = (ctx.modelRegistry as any)?.authStorage;
     return typeof authStorage?.get === "function" ? authStorage.get(PROVIDER_ID) : undefined;
@@ -236,7 +236,16 @@ function currentCodexCredential(ctx: ExtensionContext): unknown {
 }
 
 async function resolveCodexToken(ctx: ExtensionContext): Promise<{ token: string; accountId?: string } | undefined> {
-  const credential = currentCodexCredential(ctx);
+  // Use the public registry API first. Newer pi versions no longer expose the
+  // private modelRegistry.authStorage property used by older releases.
+  try {
+    const providerAuth = await ctx.modelRegistry.getProviderAuth(PROVIDER_ID);
+    const token = providerAuth?.auth.apiKey;
+    if (token) return { token };
+  } catch {}
+
+  // Keep compatibility with older pi versions that predate getProviderAuth().
+  const credential = legacyCodexCredential(ctx);
   const token = extractAccessToken(credential);
   const accountId = accountIdFromCredential(credential);
   if (token) return { token, accountId };
