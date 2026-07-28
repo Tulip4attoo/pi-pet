@@ -13,7 +13,7 @@ log_file="$root_dir/manager-powershell.log"
 dir_label="${PI_PET_BUBBLE_DIR:-$PWD}"
 owner_pid="${PI_PET_BUBBLE_PID:-$PPID}"
 user_pets_dir="${PI_PET_PETS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/pi-pet/pets}"
-manager_version="0.3.0"
+manager_version="0.3.1"
 
 usage() {
   cat <<'EOF'
@@ -111,6 +111,7 @@ stop_conflicting_managers() {
   # This matters after `pi update`, where the extension checkout/root may move while the
   # old Windows manager still owns the global mutex and watches the previous RootPath.
   PI_PET_MANAGER_VERSION="$manager_version" PI_PET_WIN_ROOT="$win_root" \
+    WSLENV="${WSLENV:+$WSLENV:}PI_PET_MANAGER_VERSION:PI_PET_WIN_ROOT" \
     powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
       "\$version = \$env:PI_PET_MANAGER_VERSION; \$root = \$env:PI_PET_WIN_ROOT; Get-CimInstance Win32_Process | Where-Object { \$_.ProcessId -ne \$PID -and \$_.CommandLine -like '*pet-bubble.ps1*' -and (\$_.CommandLine -notlike ('*-ManagerVersion ' + \$version + '*') -or \$_.CommandLine -notlike ('*' + \$root + '*')) } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }" \
       >/dev/null 2>&1 || true

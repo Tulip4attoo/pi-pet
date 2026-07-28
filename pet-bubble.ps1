@@ -10,7 +10,7 @@ param(
 
     [string]$UserPetsPath = "",
 
-    [string]$ManagerVersion = "0.3.0"
+    [string]$ManagerVersion = "0.3.1"
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,9 +62,26 @@ public static class PiPetBubbleWin32 {
     [DllImport("user32.dll")]
     public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(
+        IntPtr hWnd,
+        IntPtr hWndInsertAfter,
+        int X,
+        int Y,
+        int cx,
+        int cy,
+        uint uFlags
+    );
+
     public const int GWL_EXSTYLE = -20;
+    public const int WS_EX_TOPMOST = 0x00000008;
     public const int WS_EX_TOOLWINDOW = 0x00000080;
     public const int WS_EX_NOACTIVATE = 0x08000000;
+    public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    public const uint SWP_NOSIZE = 0x0001;
+    public const uint SWP_NOMOVE = 0x0002;
+    public const uint SWP_NOACTIVATE = 0x0010;
+    public const uint SWP_NOOWNERZORDER = 0x0200;
 }
 "@
 
@@ -150,7 +167,13 @@ function Get-CursorPosition {
 }
 
 function Get-OverlayWindowHandle {
-    if ($script:windowHandle -and $script:windowHandle -ne [IntPtr]::Zero) { return $script:windowHandle }
+    if ($script:windowHandle -and $script:windowHandle -ne [IntPtr]::Zero) {
+        try {
+            if ([PiPetBubbleWin32]::IsWindow($script:windowHandle)) { return $script:windowHandle }
+        }
+        catch {}
+        $script:windowHandle = [IntPtr]::Zero
+    }
     try {
         if ($null -ne $window) {
             $script:windowHandle = (New-Object System.Windows.Interop.WindowInteropHelper -ArgumentList $window).Handle
@@ -168,6 +191,35 @@ function Set-OverlayNoActivate {
         $style = [PiPetBubbleWin32]::GetWindowLong($handle, [PiPetBubbleWin32]::GWL_EXSTYLE)
         $style = $style -bor [PiPetBubbleWin32]::WS_EX_TOOLWINDOW -bor [PiPetBubbleWin32]::WS_EX_NOACTIVATE
         [void][PiPetBubbleWin32]::SetWindowLong($handle, [PiPetBubbleWin32]::GWL_EXSTYLE, $style)
+    }
+    catch {}
+}
+
+function Ensure-OverlayTopmost([switch]$Force) {
+    try {
+        $handle = Get-OverlayWindowHandle
+        if ($handle -eq [IntPtr]::Zero) { return }
+
+        $style = [PiPetBubbleWin32]::GetWindowLong($handle, [PiPetBubbleWin32]::GWL_EXSTYLE)
+        $isTopmost = ($style -band [PiPetBubbleWin32]::WS_EX_TOPMOST) -ne 0
+        if (-not $Force -and $isTopmost) { return }
+
+        # WPF sets Topmost only when the property changes. Shell/display transitions
+        # or another program can demote the native HWND while Window.Topmost still
+        # says true, so repair the native z-order without taking keyboard focus.
+        $flags = [PiPetBubbleWin32]::SWP_NOMOVE -bor
+            [PiPetBubbleWin32]::SWP_NOSIZE -bor
+            [PiPetBubbleWin32]::SWP_NOACTIVATE -bor
+            [PiPetBubbleWin32]::SWP_NOOWNERZORDER
+        [void][PiPetBubbleWin32]::SetWindowPos(
+            $handle,
+            [PiPetBubbleWin32]::HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            $flags
+        )
     }
     catch {}
 }
@@ -1466,6 +1518,7 @@ $window.Content = $rootGrid
 $window.Add_SourceInitialized({
     try { $script:windowHandle = (New-Object System.Windows.Interop.WindowInteropHelper -ArgumentList $window).Handle } catch {}
     Set-OverlayNoActivate
+    Ensure-OverlayTopmost -Force
     Set-WindowInsideVirtualScreen
 })
 
@@ -1569,6 +1622,7 @@ Scan-Usage
 
 $timer = New-Object Windows.Threading.DispatcherTimer
 $script:lastWatchdogUtc = [DateTime]::MinValue
+$script:lastZOrderCheckUtc = [DateTime]::MinValue
 $timer.Interval = [TimeSpan]::FromMilliseconds(250)
 $timer.Add_Tick({
     try {
@@ -1579,6 +1633,10 @@ $timer.Add_Tick({
         if (($now - $script:lastWatchdogUtc).TotalSeconds -ge 1) {
             $script:lastWatchdogUtc = $now
             Run-Watchdog
+        }
+        if (($now - $script:lastZOrderCheckUtc).TotalSeconds -ge 2) {
+            $script:lastZOrderCheckUtc = $now
+            Ensure-OverlayTopmost
         }
     } catch {}
 })
