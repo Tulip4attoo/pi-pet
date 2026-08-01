@@ -100,9 +100,29 @@ PY
   done
 }
 
-windows_exe_interop_available() {
+windows_launcher=()
+
+configure_windows_launcher() {
   [[ -S "${WSL_INTEROP:-}" ]] || return 1
-  [[ -e /proc/sys/fs/binfmt_misc/WSLInterop || -e /proc/sys/fs/binfmt_misc/WSLInterop-late ]] || return 1
+
+  local powershell_exe
+  powershell_exe="$(command -v powershell.exe 2>/dev/null || true)"
+  [[ -n "$powershell_exe" ]] || return 1
+
+  if [[ -e /proc/sys/fs/binfmt_misc/WSLInterop || -e /proc/sys/fs/binfmt_misc/WSLInterop-late ]]; then
+    windows_launcher=("$powershell_exe")
+    return 0
+  fi
+
+  # Some WSL launches retain the interop socket but lose the binfmt registration,
+  # causing direct *.exe calls to fail with "Exec format error". WSL's init can
+  # still forward an absolute Windows executable path in that state.
+  if [[ -x /init ]]; then
+    windows_launcher=(/init "$powershell_exe")
+    return 0
+  fi
+
+  return 1
 }
 
 stop_conflicting_managers() {
@@ -112,7 +132,7 @@ stop_conflicting_managers() {
   # old Windows manager still owns the global mutex and watches the previous RootPath.
   PI_PET_MANAGER_VERSION="$manager_version" PI_PET_WIN_ROOT="$win_root" \
     WSLENV="${WSLENV:+$WSLENV:}PI_PET_MANAGER_VERSION:PI_PET_WIN_ROOT" \
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
+    "${windows_launcher[@]}" -NoProfile -ExecutionPolicy Bypass -Command \
       "\$version = \$env:PI_PET_MANAGER_VERSION; \$root = \$env:PI_PET_WIN_ROOT; Get-CimInstance Win32_Process | Where-Object { \$_.ProcessId -ne \$PID -and \$_.CommandLine -like '*pet-bubble.ps1*' -and (\$_.CommandLine -notlike ('*-ManagerVersion ' + \$version + '*') -or \$_.CommandLine -notlike ('*' + \$root + '*')) } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }" \
       >/dev/null 2>&1 || true
 }
@@ -127,10 +147,10 @@ ensure_started() {
   win_state="$(wslpath -w "$manager_state_file")"
   win_user_pets="$(wslpath -w "$user_pets_dir" 2>/dev/null || true)"
 
-  if ! windows_exe_interop_available; then
+  if ! configure_windows_launcher; then
     {
       echo "WSL Windows-exe interop is not available; cannot start pet-bubble.ps1."
-      echo "Check /proc/sys/fs/binfmt_misc/WSLInterop and WSL_INTEROP, then restart WSL with: wsl.exe --shutdown"
+      echo "Check WSL_INTEROP, then restart WSL with: wsl.exe --shutdown"
     } >"$log_file"
     return 0
   fi
@@ -138,7 +158,7 @@ ensure_started() {
   stop_conflicting_managers "$win_root"
 
   # Safe to call repeatedly: pet-bubble.ps1 uses one global manager mutex.
-  nohup powershell.exe -NoProfile -ExecutionPolicy Bypass \
+  nohup "${windows_launcher[@]}" -NoProfile -ExecutionPolicy Bypass \
     -File "$ps_script" \
     -RootPath "$win_root" \
     -StatePath "$win_state" \
