@@ -13,7 +13,7 @@ log_file="$root_dir/manager-powershell.log"
 dir_label="${PI_PET_BUBBLE_DIR:-$PWD}"
 owner_pid="${PI_PET_BUBBLE_PID:-$PPID}"
 user_pets_dir="${PI_PET_PETS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/pi-pet/pets}"
-manager_version="0.3.1"
+manager_version="0.4.0"
 
 usage() {
   cat <<'EOF'
@@ -87,11 +87,16 @@ cleanup_stale_rows() {
 import json, sys
 try:
     with open(sys.argv[1], encoding='utf-8') as f:
-        print(json.load(f).get('pid', ''))
+        command = json.load(f)
+        print('win32' if command.get('platform') == 'win32' else command.get('pid', ''))
 except Exception:
     pass
 PY
 )"
+
+    # Native Windows rows may share this checkout. Their PIDs are not Linux PIDs;
+    # leave their cleanup to the PowerShell manager's Windows process watchdog.
+    [[ "$pid" != "win32" ]] || continue
 
     # Old pre-pid rows, or rows whose owning WSL/pi process is gone, are stale.
     if [[ -z "$pid" || ! -d "/proc/$pid" ]]; then

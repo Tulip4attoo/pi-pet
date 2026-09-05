@@ -5,16 +5,16 @@ import { cp, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promise
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getPetsDir, sendWindowsBubble } from "../lib/windows-bubble.mjs";
 
-const instanceId = `pi-${process.pid}`;
+const nativeWindows = process.platform === "win32";
+const instanceId = nativeWindows ? `pi-win-${process.pid}` : `pi-${process.pid}`;
 const extensionDir = dirname(fileURLToPath(import.meta.url));
 const packageRoot = dirname(extensionDir);
 const bubbleScript = join(packageRoot, "pet-bubble.sh");
-const petInstallScript = join(packageRoot, "pet-install.sh");
+const petInstallScript = join(packageRoot, nativeWindows ? "pet-install.ps1" : "pet-install.sh");
 const bundledPetsDir = join(packageRoot, "pets");
-const userDataRoot = process.env.XDG_DATA_HOME?.trim() || join(homedir(), ".local", "share");
-const configuredPetsDir = process.env.PI_PET_PETS_DIR?.trim();
-const petsDir = configuredPetsDir || join(userDataRoot, "pi-pet", "pets");
+const petsDir = getPetsDir();
 const activePetFile = join(petsDir, "active");
 const legacyActivePetFile = join(bundledPetsDir, "active");
 const usageFile = join(packageRoot, "tmp", "pet-bubbles", instanceId, "usage.json");
@@ -77,7 +77,16 @@ function bubbleEnv(projectCwd: string) {
   };
 }
 
+function runNativeBubble(projectCwd: string, args: string[], restart = false) {
+  try {
+    sendWindowsBubble({ packageRoot, petsDir, id: instanceId, cwd: projectCwd, pid: process.pid, restart }, args);
+  } catch {
+    // Bubble is cosmetic; never break pi because the overlay failed.
+  }
+}
+
 function runBubble(projectCwd: string, args: string[]) {
+  if (nativeWindows) return runNativeBubble(projectCwd, args);
   if (!existsSync(bubbleScript)) return;
 
   try {
@@ -87,6 +96,7 @@ function runBubble(projectCwd: string, args: string[]) {
       stdio: "ignore",
       env: bubbleEnv(projectCwd),
     });
+    child.on("error", () => {});
     child.unref();
   } catch {
     // Bubble is cosmetic; never break pi because the overlay failed.
@@ -94,6 +104,7 @@ function runBubble(projectCwd: string, args: string[]) {
 }
 
 function runBubbleSync(projectCwd: string, args: string[]) {
+  if (nativeWindows) return runNativeBubble(projectCwd, args);
   if (!existsSync(bubbleScript)) return;
 
   try {
@@ -590,6 +601,7 @@ function runProcess(command: string, args: string[], options: { cwd?: string; en
       cwd: options.cwd,
       env: options.env,
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     });
 
     child.stdout?.on("data", (chunk) => {
@@ -958,7 +970,11 @@ async function installPet(target: string): Promise<string> {
   if (!existsSync(petInstallScript)) throw new Error(`Missing installer: ${petInstallScript}`);
   await ensurePetStorage();
 
-  const result = await runProcess("bash", [petInstallScript, target.trim()], {
+  const command = nativeWindows ? "powershell.exe" : "bash";
+  const args = nativeWindows
+    ? ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-STA", "-File", petInstallScript, "-Target", target.trim()]
+    : [petInstallScript, target.trim()];
+  const result = await runProcess(command, args, {
     cwd: packageRoot,
     env: { ...process.env, PI_PET_PETS_DIR: petsDir },
     timeoutMs: 180_000,
@@ -1077,6 +1093,10 @@ function loadPetGuide(pi: ExtensionAPI, ctx: ExtensionContext): void {
 }
 
 function restartPetOverlay(projectCwd: string, activePet: string): void {
+  if (nativeWindows) {
+    runNativeBubble(projectCwd, ["finished", `Pet: ${activePet}`], true);
+    return;
+  }
   try {
     spawnSync(
       "powershell.exe",

@@ -2,7 +2,19 @@
 
 ## Project notes
 
-This repo is a pi package for a WSL -> Windows pet/bubble overlay.
+This repo is a pi package for a native Windows or WSL -> Windows pet/bubble overlay.
+
+Native Windows uses `lib/windows-bubble.mjs` to write commands directly from Node,
+then launches the same WPF manager. `pet-bubble.mjs` is its standalone CLI.
+`pet-install.ps1` installs community packs without Bash/Python; the WSL scripts
+remain supported. Native commands carry `platform: "win32"` and Windows PIDs;
+legacy WSL commands must never be checked against Windows PIDs.
+
+Keep command writing synchronous/atomic and before any UI startup on both paths.
+Do not use `detached: true` for the native hidden PowerShell launcher: Windows
+PowerShell can exit before executing the script. Use redirected stdio and `unref()`.
+Run `npm test` for offline tests; on Windows this also parses PowerShell and tests
+the native installer against a generated local pack.
 
 ## Codex/Petdex pet sprite contract
 

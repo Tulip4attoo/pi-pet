@@ -10,10 +10,72 @@ param(
 
     [string]$UserPetsPath = "",
 
-    [string]$ManagerVersion = "0.3.1"
+    [string]$ManagerVersion = "0.4.0",
+
+    # Native Node launcher requests conflict cleanup here, after command.json exists.
+    [switch]$Bootstrap,
+    [switch]$Restart
 )
 
 $ErrorActionPreference = "Stop"
+
+$launchMutex = $null
+$launchLockHeld = $false
+$managerOwnerPath = Join-Path ([IO.Path]::GetTempPath()) "pi-pet-manager-owner.json"
+try {
+    if ($Bootstrap) {
+        $launchMutex = New-Object System.Threading.Mutex($false, "Local\PiPetBubbleOverlayLauncher")
+        try { $launchLockHeld = $launchMutex.WaitOne(10000) }
+        catch [System.Threading.AbandonedMutexException] { $launchLockHeld = $true }
+        if (-not $launchLockHeld) { exit 0 }
+        Write-Output "pi-pet: checking manager (restart=$Restart)"
+
+        # Match actual PowerShell -File invocations, not terminals/editors whose
+        # command line happens to mention the script. Never terminate this process.
+        $scriptPattern = '(?i)-File\s+(?:"[^"]*[\\/]pet-bubble\.ps1"|[^\s"]*[\\/]pet-bubble\.ps1)(?:\s|$)'
+        foreach ($process in (Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
+            if ($process.ProcessId -eq $PID -or $process.Name -notin @("powershell.exe", "pwsh.exe")) { continue }
+            $line = [string]$process.CommandLine
+            if ($line -notmatch $scriptPattern) { continue }
+            # Other bootstrap candidates are serialized by launchMutex, not killed.
+            if ($line -match '(?i)\s-Bootstrap(?:\s|$)') {
+                # An already running manager also retains -Bootstrap in its command
+                # line. Its PID is recorded only once it owns the manager mutex.
+                $owner = $null
+                try { $owner = Get-Content -LiteralPath $managerOwnerPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch {}
+                if ($null -eq $owner -or [int]$owner.pid -ne [int]$process.ProcessId) { continue }
+            }
+            $sameVersion = $line -match ('(?i)-ManagerVersion\s+"?' + [regex]::Escape($ManagerVersion) + '"?(?:\s|$)')
+            $sameRoot = $line.IndexOf($RootPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            if ($Restart -or -not $sameVersion -or -not $sameRoot) {
+                Write-Output "pi-pet: replacing manager $($process.ProcessId)"
+                try {
+                    Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
+                    Wait-Process -Id $process.ProcessId -Timeout 2 -ErrorAction SilentlyContinue
+                } catch {}
+            }
+        }
+    }
+
+    $mutex = New-Object System.Threading.Mutex($false, "Global\PiPetBubbleOverlayManager")
+    $ownsManagerMutex = $false
+    try { $ownsManagerMutex = $mutex.WaitOne(0) }
+    catch [System.Threading.AbandonedMutexException] { $ownsManagerMutex = $true }
+    if (-not $ownsManagerMutex) {
+        Write-Output 'pi-pet: manager already running'
+        $mutex.Dispose()
+        exit 0
+    }
+    if ($Bootstrap) {
+        try {
+            @{ pid = $PID } | ConvertTo-Json -Compress | Set-Content -LiteralPath $managerOwnerPath -Encoding UTF8
+        } catch {}
+    }
+}
+finally {
+    if ($launchLockHeld) { $launchMutex.ReleaseMutex() }
+    if ($null -ne $launchMutex) { $launchMutex.Dispose() }
+}
 
 Add-Type -AssemblyName PresentationCore, PresentationFramework, WindowsBase
 
@@ -85,13 +147,6 @@ public static class PiPetBubbleWin32 {
 }
 "@
 
-$createdNew = $false
-$mutex = New-Object System.Threading.Mutex($true, "Global\PiPetBubbleOverlayManager", [ref]$createdNew)
-if (-not $createdNew) {
-    # Existing manager process will pick up command files.
-    exit 0
-}
-
 function Ensure-Directory([string]$Path) {
     if ($Path -and -not (Test-Path -LiteralPath $Path)) {
         New-Item -ItemType Directory -Path $Path -Force | Out-Null
@@ -106,7 +161,7 @@ function Ensure-ParentDirectory([string]$Path) {
 function Read-JsonFile([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
     try {
-        $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+        $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
         if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
         return $raw | ConvertFrom-Json -ErrorAction Stop
     }
@@ -295,7 +350,7 @@ function Activate-WindowHandle([Int64]$Handle) {
 
 function Find-TerminalWindow($Item) {
     try {
-        $terminalProcessNames = @("WindowsTerminal", "wt", "OpenConsole", "conhost", "mintty", "wezterm-gui", "alacritty", "kitty", "Tabby", "FluentTerminal")
+        $terminalProcessNames = @("WindowsTerminal", "wt", "OpenConsole", "conhost", "powershell", "pwsh", "mintty", "wezterm-gui", "alacritty", "kitty", "Tabby", "FluentTerminal")
         $dir = if ($Item.Command -and $Item.Command.dir) { [string]$Item.Command.dir } else { "" }
         $leaf = if ($dir) { Split-Path -Leaf $dir } else { "" }
         $focusTitle = if ($Item.FocusTitle) { [string]$Item.FocusTitle } else { "" }
@@ -386,12 +441,21 @@ function Remove-DefaultBubbleTarget {
     if ($null -ne $target) { Remove-BubbleItem ([string]$target.Id) -RemoveDirectory }
 }
 
-function Test-WslPidActive($Command) {
+function Test-OwnerPidActive($Command) {
     if ($null -eq $Command) { return $true }
     if (-not ($Command.PSObject.Properties.Name -contains "pid")) { return $true }
 
     $pidText = [string]$Command.pid
     if ([string]::IsNullOrWhiteSpace($pidText)) { return $true }
+
+    if ($Command.platform -eq "win32") {
+        [int]$ownerPid = 0
+        if (-not [int]::TryParse($pidText, [ref]$ownerPid) -or $ownerPid -le 0) { return $false }
+        return $null -ne (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue)
+    }
+
+    # Legacy commands without a platform field retain the WSL behavior. Never
+    # interpret a Linux PID as a Windows PID, even on a shared Windows checkout.
     if ($null -eq $script:wslRoot) { return $true }
 
     $statPath = "$script:wslRoot\proc\$pidText\stat"
@@ -1358,7 +1422,7 @@ function Remove-BubbleItem([string]$Id, [switch]$RemoveDirectory) {
 function Run-Watchdog {
     foreach ($id in @($items.Keys)) {
         $item = $items[$id]
-        if (-not (Test-WslPidActive $item.Command)) {
+        if (-not (Test-OwnerPidActive $item.Command)) {
             Remove-BubbleItem $id -RemoveDirectory
         }
     }
@@ -1378,7 +1442,7 @@ function Scan-Commands {
         if ($items.ContainsKey($id) -and $file.LastWriteTimeUtc -le $items[$id].LastWriteUtc) { continue }
 
         $command = Read-JsonFile $commandPath
-        if (-not (Test-WslPidActive $command)) {
+        if (-not (Test-OwnerPidActive $command)) {
             Remove-BubbleItem $id -RemoveDirectory
             continue
         }
