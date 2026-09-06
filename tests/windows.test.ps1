@@ -15,10 +15,42 @@ Get-ChildItem -LiteralPath $root -Filter '*.ps1' | ForEach-Object {
 
 # Load only pure manager helpers; do not open a window or take the global mutex.
 $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'pet-bubble.ps1'), [ref]$null, [ref]$null)
-foreach ($name in @('Test-OwnerPidActive', 'Get-PetAnimationSpec', 'Read-JsonFile')) {
+foreach ($name in @('Test-OwnerPidActive', 'Get-PetAnimationSpec', 'Read-JsonFile', 'Ensure-OverlayTopmost')) {
     $definition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     . ([scriptblock]::Create($definition.Extent.Text))
 }
+# Simulate an HWND that still has WS_EX_TOPMOST but has been covered by another
+# topmost window. The watchdog must reassert z-order without moving or activating.
+Add-Type @'
+using System;
+public static class PiPetBubbleWin32 {
+    public const int GWL_EXSTYLE = -20, WS_EX_TOPMOST = 8;
+    public const uint SWP_NOSIZE = 1, SWP_NOMOVE = 2, SWP_NOACTIVATE = 16, SWP_NOOWNERZORDER = 512;
+    public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    public static int Calls;
+    public static uint Flags;
+    public static IntPtr Target;
+    public static int GetWindowLong(IntPtr hwnd, int index) { return WS_EX_TOPMOST; }
+    public static bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags) {
+        Calls++; Flags = flags; Target = after; return true;
+    }
+}
+'@
+function Get-OverlayWindowHandle { return [IntPtr]::new(123) }
+$script:petViewRoot = $null
+Ensure-OverlayTopmost
+Ensure-OverlayTopmost
+Assert ([PiPetBubbleWin32]::Calls -eq 2) 'repair z-order even when HWND already has topmost style'
+Assert ([PiPetBubbleWin32]::Target -eq [PiPetBubbleWin32]::HWND_TOPMOST) 'raise into topmost band'
+Assert ([PiPetBubbleWin32]::Flags -eq (1 -bor 2 -bor 16 -bor 512)) 'preserve focus, position, size and owner z-order'
+$script:petViewRoot = [pscustomobject]@{ ContextMenu = [pscustomobject]@{ IsOpen = $true } }
+Ensure-OverlayTopmost
+Assert ([PiPetBubbleWin32]::Calls -eq 2) 'do not cover pet context menu'
+$script:petViewRoot.ContextMenu.IsOpen = $false
+Ensure-OverlayTopmost
+Assert ([PiPetBubbleWin32]::Calls -eq 3) 'resume z-order repair after menu closes'
+$script:petViewRoot = $null
+
 $script:wslRoot = $null
 Assert (Test-OwnerPidActive ([pscustomobject]@{ pid = "$PID"; platform = 'win32' })) 'live Windows owner'
 Assert (-not (Test-OwnerPidActive ([pscustomobject]@{ pid = '2147483647'; platform = 'win32' }))) 'dead Windows owner'

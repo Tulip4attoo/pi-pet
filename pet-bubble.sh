@@ -13,7 +13,7 @@ log_file="$root_dir/manager-powershell.log"
 dir_label="${PI_PET_BUBBLE_DIR:-$PWD}"
 owner_pid="${PI_PET_BUBBLE_PID:-$PPID}"
 user_pets_dir="${PI_PET_PETS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/pi-pet/pets}"
-manager_version="0.4.0"
+manager_version="0.4.1"
 
 usage() {
   cat <<'EOF'

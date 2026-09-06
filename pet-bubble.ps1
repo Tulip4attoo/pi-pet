@@ -10,7 +10,7 @@ param(
 
     [string]$UserPetsPath = "",
 
-    [string]$ManagerVersion = "0.4.0",
+    [string]$ManagerVersion = "0.4.1",
 
     # Native Node launcher requests conflict cleanup here, after command.json exists.
     [switch]$Bootstrap,
@@ -250,18 +250,19 @@ function Set-OverlayNoActivate {
     catch {}
 }
 
-function Ensure-OverlayTopmost([switch]$Force) {
+function Ensure-OverlayTopmost {
     try {
         $handle = Get-OverlayWindowHandle
         if ($handle -eq [IntPtr]::Zero) { return }
 
-        $style = [PiPetBubbleWin32]::GetWindowLong($handle, [PiPetBubbleWin32]::GWL_EXSTYLE)
-        $isTopmost = ($style -band [PiPetBubbleWin32]::WS_EX_TOPMOST) -ne 0
-        if (-not $Force -and $isTopmost) { return }
-
-        # WPF sets Topmost only when the property changes. Shell/display transitions
-        # or another program can demote the native HWND while Window.Topmost still
-        # says true, so repair the native z-order without taking keyboard focus.
+        # WS_EX_TOPMOST means membership in the topmost band, not that this HWND
+        # is above other windows in that band. Reassert the actual z-order even
+        # when the style is already set (e.g. after switching Windows terminals).
+        # Do not toggle WPF Topmost or activate the pet: keyboard focus must stay
+        # with the user's application. Leave our own context menu above the pet.
+        if ($null -ne $script:petViewRoot -and
+            $null -ne $script:petViewRoot.ContextMenu -and
+            $script:petViewRoot.ContextMenu.IsOpen) { return }
         $flags = [PiPetBubbleWin32]::SWP_NOMOVE -bor
             [PiPetBubbleWin32]::SWP_NOSIZE -bor
             [PiPetBubbleWin32]::SWP_NOACTIVATE -bor
@@ -1582,11 +1583,12 @@ $window.Content = $rootGrid
 $window.Add_SourceInitialized({
     try { $script:windowHandle = (New-Object System.Windows.Interop.WindowInteropHelper -ArgumentList $window).Handle } catch {}
     Set-OverlayNoActivate
-    Ensure-OverlayTopmost -Force
+    Ensure-OverlayTopmost
     Set-WindowInsideVirtualScreen
 })
 
 $window.Add_ContentRendered({
+    Ensure-OverlayTopmost
     if ($script:usingDefaultPosition) {
         Move-WindowToDefaultPosition
         $script:usingDefaultPosition = $false
