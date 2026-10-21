@@ -10,7 +10,7 @@ param(
 
     [string]$UserPetsPath = "",
 
-    [string]$ManagerVersion = "0.4.1",
+    [string]$ManagerVersion = "0.4.2",
 
     # Native Node launcher requests conflict cleanup here, after command.json exists.
     [switch]$Bootstrap,
@@ -442,7 +442,7 @@ function Remove-DefaultBubbleTarget {
     if ($null -ne $target) { Remove-BubbleItem ([string]$target.Id) -RemoveDirectory }
 }
 
-function Test-OwnerPidActive($Command) {
+function Test-OwnerPidActive($Command, [DateTime]$LastWriteUtc = [DateTime]::MinValue) {
     if ($null -eq $Command) { return $true }
     if (-not ($Command.PSObject.Properties.Name -contains "pid")) { return $true }
 
@@ -452,7 +452,17 @@ function Test-OwnerPidActive($Command) {
     if ($Command.platform -eq "win32") {
         [int]$ownerPid = 0
         if (-not [int]::TryParse($pidText, [ref]$ownerPid) -or $ownerPid -le 0) { return $false }
-        return $null -ne (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue)
+        $owner = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
+        if ($null -eq $owner) { return $false }
+        # Windows recycles PIDs. A process born after the command was written
+        # cannot own it, even if it is another pi/node process with the same PID.
+        if ($LastWriteUtc -ne [DateTime]::MinValue) {
+            try {
+                if ($null -ne $owner.StartTime -and $owner.StartTime.ToUniversalTime() -gt $LastWriteUtc) { return $false }
+            } catch { # Keep the row if process start time is inaccessible.
+            }
+        }
+        return $true
     }
 
     # Legacy commands without a platform field retain the WSL behavior. Never
@@ -1423,7 +1433,7 @@ function Remove-BubbleItem([string]$Id, [switch]$RemoveDirectory) {
 function Run-Watchdog {
     foreach ($id in @($items.Keys)) {
         $item = $items[$id]
-        if (-not (Test-OwnerPidActive $item.Command)) {
+        if (-not (Test-OwnerPidActive $item.Command $item.LastWriteUtc)) {
             Remove-BubbleItem $id -RemoveDirectory
         }
     }
@@ -1443,7 +1453,7 @@ function Scan-Commands {
         if ($items.ContainsKey($id) -and $file.LastWriteTimeUtc -le $items[$id].LastWriteUtc) { continue }
 
         $command = Read-JsonFile $commandPath
-        if (-not (Test-OwnerPidActive $command)) {
+        if (-not (Test-OwnerPidActive $command $file.LastWriteTimeUtc)) {
             Remove-BubbleItem $id -RemoveDirectory
             continue
         }

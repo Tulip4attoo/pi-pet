@@ -56,6 +56,12 @@ Assert (Test-OwnerPidActive ([pscustomobject]@{ pid = "$PID"; platform = 'win32'
 Assert (-not (Test-OwnerPidActive ([pscustomobject]@{ pid = '2147483647'; platform = 'win32' }))) 'dead Windows owner'
 Assert (-not (Test-OwnerPidActive ([pscustomobject]@{ pid = 'invalid'; platform = 'win32' }))) 'invalid Windows PID'
 Assert (Test-OwnerPidActive ([pscustomobject]@{ pid = '2147483647' })) 'legacy WSL PID is not checked as Windows'
+$ownerStartUtc = (Get-Process -Id $PID).StartTime.ToUniversalTime()
+$nativeOwner = [pscustomobject]@{ pid = "$PID"; platform = 'win32' }
+Assert (Test-OwnerPidActive $nativeOwner ([DateTime]::UtcNow)) 'command written by current process remains live'
+Assert (Test-OwnerPidActive $nativeOwner $ownerStartUtc) 'owner start time equal to command timestamp is valid'
+Assert (-not (Test-OwnerPidActive $nativeOwner ($ownerStartUtc.AddSeconds(-1)))) 'recycled live PID cannot own an older command'
+Assert (Test-OwnerPidActive ([pscustomobject]@{ pid = "$PID" }) ($ownerStartUtc.AddSeconds(-1))) 'legacy WSL commands never use Windows start times'
 Assert ((Get-PetAnimationSpec 'running').Row -eq 7) 'sprite contract unchanged'
 
 . (Join-Path $root 'pet-install.ps1')
